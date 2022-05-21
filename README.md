@@ -10,7 +10,7 @@
 >
 >
 >
->- 🔗 本站基于 [docsify](https://docsify.js.org/) 搭建，字体为 [霞鹜文楷](https://github.com/lxgw/LxgwWenKai)，部署在 [gitee](https://gitee.com/)。
+>- 🔗 本站基于 [docsify](https://docsify.js.org/) 搭建，字体为 [霞鹜文楷](https://github.com/lxgw/LxgwWenKai)。
 >
 >
 >
