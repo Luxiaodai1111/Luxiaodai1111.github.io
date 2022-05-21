@@ -69,9 +69,19 @@ func (rf *Raft) getLastLog() LogEntry {
 	return rf.log[len(rf.log)-1]
 }
 
-func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntriesReply) {
+func (rf *Raft) Lock(owner string) {
+	rf.DPrintf("%s Lock", owner)
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+}
+
+func (rf *Raft) Unlock(owner string) {
+	rf.DPrintf("%s Unlock", owner)
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntriesReply) {
+	rf.Lock("AppendEntries")
+	defer rf.Unlock("AppendEntries")
 	if request.Term >= rf.currentTerm {
 		rf.role = Follower
 		rf.currentTerm = request.Term
@@ -136,7 +146,7 @@ func (rf *Raft) checkTerm(term int) {
 }
 
 func (rf *Raft) sendLog(peer int, logs []LogEntry) {
-	rf.mu.Lock()
+	rf.Lock("sendLog")
 	prevLog := rf.log[logs[0].CommandIndex-1]
 	request := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
@@ -146,13 +156,13 @@ func (rf *Raft) sendLog(peer int, logs []LogEntry) {
 		Entries:      logs, // 一次可以发送多条日志
 		LeaderCommit: rf.commitIndex,
 	}
-	rf.mu.Unlock()
+	rf.Unlock("sendLog")
 
 	response := new(AppendEntriesReply)
 	rf.DPrintf("send log %+v to %d", request, peer)
 	if rf.sendAppendEntries(peer, request, response) {
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
+		rf.Lock("sendAppendEntries")
+		defer rf.Unlock("sendAppendEntries")
 		rf.checkTerm(response.Term)
 		if rf.role != Leader {
 			return
@@ -172,7 +182,7 @@ func (rf *Raft) sendLog(peer int, logs []LogEntry) {
 }
 
 func (rf *Raft) sendHeartbeat(peer int) {
-	rf.mu.Lock()
+	rf.Lock("sendHeartbeat")
 	request := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
@@ -181,14 +191,14 @@ func (rf *Raft) sendHeartbeat(peer int) {
 		Entries:      nil,
 		LeaderCommit: rf.commitIndex,
 	}
-	rf.mu.Unlock()
+	rf.Unlock("sendHeartbeat")
 
 	response := new(AppendEntriesReply)
 	rf.DPrintf("send heartbeat %+v to %d", request, peer)
 	if rf.sendAppendEntries(peer, request, response) {
 		rf.DPrintf("receive AppendEntriesReply from %d, response is %+v", peer, response)
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
+		rf.Lock("sendAppendEntries")
+		defer rf.Unlock("sendAppendEntries")
 		rf.checkTerm(response.Term)
 	} else {
 		rf.DPrintf("heartbeat RPC failed")
@@ -196,6 +206,7 @@ func (rf *Raft) sendHeartbeat(peer int) {
 }
 
 func (rf *Raft) broadcastHeartbeat() {
+	rf.DPrintf("broadcastHeartbeat start")
 	for peer := range rf.peers {
 		if peer == rf.me {
 			continue
@@ -207,6 +218,8 @@ func (rf *Raft) broadcastHeartbeat() {
 			go rf.sendHeartbeat(peer)
 		}
 	}
+
+	rf.DPrintf("broadcastHeartbeat end")
 
 	return
 }
@@ -252,8 +265,8 @@ func (rf *Raft) ElectionTimeout() time.Duration {
 func (rf *Raft) GetState() (int, bool) {
 	var isleader bool
 
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.Lock("GetState")
+	defer rf.Unlock("GetState")
 	if rf.role == Leader {
 		isleader = true
 	} else {
@@ -325,8 +338,8 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.Lock("RequestVote")
+	defer rf.Unlock("RequestVote")
 
 	// 对端任期小或者本端已经投票过了，那么拒绝投票
 	if request.Term < rf.currentTerm || (request.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != request.CandidateId) {
@@ -372,8 +385,8 @@ func (rf *Raft) startElection() {
 			rf.DPrintf("send RequestVote %+v to %d", request, peer)
 			if rf.sendRequestVote(peer, request, response) {
 				rf.DPrintf("receive RequestVote from %d, response is %+v", peer, response)
-				rf.mu.Lock()
-				defer rf.mu.Unlock()
+				rf.Lock("sendRequestVote")
+				defer rf.Unlock("sendRequestVote")
 				// 过期轮次的回复直接丢弃
 				if request.Term < rf.currentTerm {
 					return
@@ -421,8 +434,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := false
 
 	// Your code here (2B).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.Lock("Start")
+	defer rf.Unlock("Start")
 	if rf.role == Leader {
 		rf.DPrintf("start cmd %+v", command)
 		// 添加本地日志
@@ -480,6 +493,7 @@ func (rf *Raft) commitCheck(commitIndex int) bool {
 }
 
 func (rf *Raft) applyCommitLog() {
+	rf.DPrintf("applyCommitLog")
 	for idx := rf.lastApplied + 1; idx <= rf.commitIndex; idx++ {
 		select {
 		case rf.applyCh <- ApplyMsg{
@@ -490,25 +504,36 @@ func (rf *Raft) applyCommitLog() {
 			rf.DPrintf("apply commited log %d", idx)
 			rf.lastApplied = idx
 		default:
-			break
+			return
 		}
 	}
 }
 
 func (rf *Raft) commitLog() {
+	rf.DPrintf("commitLog start")
+	defer rf.DPrintf("commitLog end")
 	// 二分查找可以提交的索引
 	low := rf.commitIndex + 1
 	high := len(rf.log) - 1
+	if low > high {
+		return
+	}
 	nextCommitIndex := (low + high) / 2
-	for ; low <= high; nextCommitIndex = (low + high) / 2 {
+	for ; low != high; nextCommitIndex = (low + high) / 2 {
 		if rf.commitCheck(nextCommitIndex) {
 			rf.commitIndex = nextCommitIndex
 			rf.DPrintf("commit log %d", nextCommitIndex)
-			break
+			return
 		} else {
 			high = nextCommitIndex
 		}
 	}
+	if rf.commitCheck(low) {
+		rf.commitIndex = nextCommitIndex
+		rf.DPrintf("commit log %d", nextCommitIndex)
+	}
+
+	return
 }
 
 // The ticker go routine starts a new election if this peer hasn't received
@@ -517,15 +542,15 @@ func (rf *Raft) ticker() {
 	for rf.killed() == false {
 		select {
 		case <-rf.electionTimer.C:
-			rf.mu.Lock()
+			rf.Lock("electionTimer")
 			// 开始竞选，任期加一
 			rf.role = Candidate
 			rf.currentTerm += 1
 			rf.startElection()
 			rf.electionTimer.Reset(rf.ElectionTimeout())
-			rf.mu.Unlock()
+			rf.Unlock("electionTimer")
 		case <-rf.heartbeatTimer.C:
-			rf.mu.Lock()
+			rf.Lock("heartbeatTimer")
 			if rf.role == Leader {
 				// 更新提交索引
 				rf.commitLog()
@@ -536,7 +561,7 @@ func (rf *Raft) ticker() {
 			// 更新应用索引
 			rf.applyCommitLog()
 			rf.heartbeatTimer.Reset(rf.HeartbeatTimeout())
-			rf.mu.Unlock()
+			rf.Unlock("heartbeatTimer")
 		}
 	}
 }
