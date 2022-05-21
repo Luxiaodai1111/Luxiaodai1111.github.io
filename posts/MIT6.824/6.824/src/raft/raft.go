@@ -84,7 +84,9 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 
 	response.Term = rf.currentTerm
 
-	rf.DPrintf("log %+v, commitIndex: %d, lastApplied: %d", rf.log, rf.commitIndex, rf.lastApplied)
+	lastLog := rf.getLastLog()
+	rf.DPrintf("last log term %d index %d, commitIndex: %d, lastApplied: %d", lastLog.Term, lastLog.CommandIndex, rf.commitIndex, rf.lastApplied)
+	//rf.DPrintf("log %+v, commitIndex: %d, lastApplied: %d", rf.log, rf.commitIndex, rf.lastApplied)
 	// 检查日志
 	if request.Entries == nil ||
 		(len(rf.log) > request.PrevLogIndex && rf.log[request.PrevLogIndex].Term == request.PrevLogTerm) {
@@ -93,7 +95,8 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 		for i, entry := range request.Entries {
 			if entry.CommandIndex == len(rf.log) {
 				rf.log = append(rf.log, request.Entries[i:]...)
-				rf.DPrintf("append log %+v", request.Entries[i:])
+				//rf.DPrintf("append log %+v", request.Entries[i:])
+				rf.DPrintf("append log %d...", request.Entries[i].CommandIndex)
 				break
 			}
 		}
@@ -107,7 +110,6 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 			}
 			rf.DPrintf("update commitIndex %d", rf.commitIndex)
 		}
-		rf.DPrintf("rf.log: %+v", rf.log)
 	} else {
 		rf.DPrintf("log unmatch")
 		// 如果自己不存在索引、任期和 prevLogIndex、 prevLogItem 匹配的日志返回 false。
@@ -324,6 +326,7 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply
 
 	// 对端任期小或者本端已经投票过了，那么拒绝投票
 	if request.Term < rf.currentTerm || (request.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != request.CandidateId) {
+		rf.DPrintf("already vote, refuse to vote")
 		response.Term, response.VoteGranted = rf.currentTerm, false
 		return
 	}
@@ -331,6 +334,7 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply
 	// 本地日志要更新一些，拒绝投票
 	lastLog := rf.getLastLog()
 	if lastLog.Term > request.LastLogTerm || (lastLog.Term == request.LastLogTerm && lastLog.CommandIndex > request.LastLogIndex) {
+		rf.DPrintf("local log is newer, refuse to vote")
 		response.Term, response.VoteGranted = rf.currentTerm, false
 		return
 	}
