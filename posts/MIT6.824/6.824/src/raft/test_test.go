@@ -18,6 +18,7 @@ import "sync"
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
+const DebugTime = 5 * time.Second
 
 func TestInitialElection2A(t *testing.T) {
 	servers := 3
@@ -123,63 +124,75 @@ func TestManyElections2A(t *testing.T) {
 	cfg.end()
 }
 
-//func TestBasicAgree2B(t *testing.T) {
-//	servers := 3
-//	cfg := make_config(t, servers, false, false)
-//	defer cfg.cleanup()
-//
-//	cfg.begin("Test (2B): basic agreement")
-//
-//	iters := 3
-//	for index := 1; index < iters+1; index++ {
-//		nd, _ := cfg.nCommitted(index)
-//		if nd > 0 {
-//			t.Fatalf("some have committed before Start()")
-//		}
-//
-//		xindex := cfg.one(index*100, servers, false)
-//		if xindex != index {
-//			t.Fatalf("got index %v but expected %v", xindex, index)
-//		}
-//	}
-//
-//	cfg.end()
-//}
+func TestBasicAgree2B(t *testing.T) {
+	defer func() {
+		if Debug {
+			time.Sleep(DebugTime)
+		}
+	}()
+
+	servers := 3
+	cfg := make_config(t, servers, false, false)
+	defer cfg.cleanup()
+
+	cfg.begin("Test (2B): basic agreement")
+
+	iters := 3
+	for index := 1; index < iters+1; index++ {
+		nd, _ := cfg.nCommitted(index)
+		if nd > 0 {
+			t.Fatalf("some have committed before Start()")
+		}
+
+		xindex := cfg.one(index*100, servers, false)
+		if xindex != index {
+			t.Fatalf("got index %v but expected %v", xindex, index)
+		}
+	}
+
+	cfg.end()
+}
 
 //
 // check, based on counting bytes of RPCs, that
 // each command is sent to each peer just once.
 //
-//func TestRPCBytes2B(t *testing.T) {
-//	servers := 3
-//	cfg := make_config(t, servers, false, false)
-//	defer cfg.cleanup()
-//
-//	cfg.begin("Test (2B): RPC byte count")
-//
-//	cfg.one(99, servers, false)
-//	bytes0 := cfg.bytesTotal()
-//
-//	iters := 10
-//	var sent int64 = 0
-//	for index := 2; index < iters+2; index++ {
-//		cmd := randstring(5000)
-//		xindex := cfg.one(cmd, servers, false)
-//		if xindex != index {
-//			t.Fatalf("got index %v but expected %v", xindex, index)
-//		}
-//		sent += int64(len(cmd))
-//	}
-//
-//	bytes1 := cfg.bytesTotal()
-//	got := bytes1 - bytes0
-//	expected := int64(servers) * sent
-//	if got > expected+50000 {
-//		t.Fatalf("too many RPC bytes; got %v, expected %v", got, expected)
-//	}
-//
-//	cfg.end()
-//}
+func TestRPCBytes2B(t *testing.T) {
+	defer func() {
+		if Debug {
+			time.Sleep(DebugTime)
+		}
+	}()
+
+	servers := 3
+	cfg := make_config(t, servers, false, false)
+	defer cfg.cleanup()
+
+	cfg.begin("Test (2B): RPC byte count")
+
+	cfg.one(99, servers, false)
+	bytes0 := cfg.bytesTotal()
+
+	iters := 10
+	var sent int64 = 0
+	for index := 2; index < iters+2; index++ {
+		cmd := randstring(5000)
+		xindex := cfg.one(cmd, servers, false)
+		if xindex != index {
+			t.Fatalf("got index %v but expected %v", xindex, index)
+		}
+		sent += int64(len(cmd))
+	}
+
+	bytes1 := cfg.bytesTotal()
+	got := bytes1 - bytes0
+	expected := int64(servers) * sent
+	if got > expected+50000 {
+		t.Fatalf("too many RPC bytes; got %v, expected %v", got, expected)
+	}
+
+	cfg.end()
+}
 
 //
 // test just failure of followers.
@@ -275,6 +288,12 @@ func For2023TestLeaderFailure2B(t *testing.T) {
 // disconnect and re-connect.
 //
 func TestFailAgree2B(t *testing.T) {
+	defer func() {
+		if Debug {
+			time.Sleep(DebugTime)
+		}
+	}()
+
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -309,6 +328,12 @@ func TestFailAgree2B(t *testing.T) {
 }
 
 func TestFailNoAgree2B(t *testing.T) {
+	defer func() {
+		if Debug {
+			time.Sleep(DebugTime)
+		}
+	}()
+
 	servers := 5
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -360,6 +385,12 @@ func TestFailNoAgree2B(t *testing.T) {
 }
 
 func TestConcurrentStarts2B(t *testing.T) {
+	defer func() {
+		if Debug {
+			time.Sleep(DebugTime)
+		}
+	}()
+
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -461,6 +492,12 @@ loop:
 }
 
 func TestRejoin2B(t *testing.T) {
+	defer func() {
+		if Debug {
+			time.Sleep(DebugTime)
+		}
+	}()
+
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -499,6 +536,12 @@ func TestRejoin2B(t *testing.T) {
 }
 
 func TestBackup2B(t *testing.T) {
+	defer func() {
+		if Debug {
+			time.Sleep(DebugTime)
+		}
+	}()
+
 	servers := 5
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -571,6 +614,12 @@ func TestBackup2B(t *testing.T) {
 }
 
 func TestCount2B(t *testing.T) {
+	defer func() {
+		if Debug {
+			time.Sleep(DebugTime)
+		}
+	}()
+
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()

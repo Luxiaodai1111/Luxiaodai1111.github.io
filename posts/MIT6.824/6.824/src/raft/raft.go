@@ -100,7 +100,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 				break
 			}
 		}
-		// 如果 leaderCommit>commitIndex，设置本地 commitIndex 为 leaderCommit 和最新日志索引中较小的一个。
+		// 如果 leaderCommit 大于 commitIndex，设置本地 commitIndex 为 leaderCommit 和最新日志索引中较小的一个。
 		lastLog := rf.getLastLog()
 		if request.LeaderCommit > rf.commitIndex {
 			if lastLog.CommandIndex < request.LeaderCommit {
@@ -164,6 +164,8 @@ func (rf *Raft) sendLog(peer int, logs []LogEntry) {
 		} else {
 			rf.nextIndex[peer] -= 1
 		}
+	} else {
+		rf.DPrintf("send log RPC failed")
 	}
 
 	return
@@ -188,6 +190,8 @@ func (rf *Raft) sendHeartbeat(peer int) {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 		rf.checkTerm(response.Term)
+	} else {
+		rf.DPrintf("heartbeat RPC failed")
 	}
 }
 
@@ -390,6 +394,8 @@ func (rf *Raft) startElection() {
 						rf.broadcastHeartbeat()
 					}
 				}
+			} else {
+				rf.DPrintf("RequestVote RPC failed")
 			}
 		}(peer)
 	}
