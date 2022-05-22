@@ -196,7 +196,6 @@ func (rf *Raft) checkTerm(peer int, term int) {
 		rf.role = Follower
 		rf.currentTerm = term
 		rf.votedFor = -1
-		rf.electionTimer.Reset(rf.ElectionTimeout())
 	}
 }
 
@@ -328,12 +327,12 @@ type Raft struct {
 }
 
 func (rf *Raft) HeartbeatTimeout() time.Duration {
-	return time.Millisecond * 100
+	return time.Millisecond * 10
 }
 
 func (rf *Raft) ElectionTimeout() time.Duration {
 	rand.Seed(time.Now().Unix() + int64(rf.me))
-	return time.Millisecond * time.Duration(500+rand.Int63n(500))
+	return time.Millisecond * time.Duration(100+rand.Int63n(100))
 }
 
 // return currentTerm and whether this server
@@ -436,6 +435,9 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply
 
 	// 投票，重复回复也没事，TCP 会帮你处理掉的
 	rf.DPrintf("vote for %d", request.CandidateId)
+	// 既然要投票给别人，那自己肯定就不竞选了
+	rf.electionTimer.Reset(rf.ElectionTimeout())
+	rf.role = Follower
 	rf.votedFor = request.CandidateId
 	response.Term, response.VoteGranted = rf.currentTerm, true
 }
@@ -483,6 +485,7 @@ func (rf *Raft) startElection() {
 						// 竞选成功
 						rf.DPrintf("====== candidate success ======")
 						rf.role = Leader
+						rf.electionTimer.Reset(rf.ElectionTimeout())
 						// 每次选举后重新初始化
 						for i := 0; i < len(rf.peers); i++ {
 							rf.nextIndex[i] = len(rf.log)
