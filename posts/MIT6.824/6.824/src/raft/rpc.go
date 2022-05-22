@@ -10,8 +10,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int  // 当前任期
-	Success bool // 如果包含索引为 prevLogIndex 和任期为 prevLogItem 的日志，则为 true
+	Term          int  // 当前任期
+	Success       bool // 如果包含索引为 prevLogIndex 和任期为 prevLogItem 的日志，则为 true
+	ConflictTerm  int  // 告诉 Leader 下次检查的 ConflictTerm
+	ConflictIndex int  // ConflictTerm 任期内最大的 Index
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
