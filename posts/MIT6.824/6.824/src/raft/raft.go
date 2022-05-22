@@ -101,7 +101,7 @@ func (rf *Raft) getFirstLog(term int) (ConflictIndex int) {
 
 	for i := middle; i >= 0; i-- {
 		if rf.log[i].Term != term {
-			rf.DPrintf("getFirstLog in term %d: %d", term, i)
+			rf.DPrintf("getFirstLog in term %d: %d", term, i+1)
 			return i + 1
 		}
 	}
@@ -154,6 +154,8 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 			} else {
 				rf.commitIndex = request.LeaderCommit
 			}
+			// 更新状态机
+			rf.applyCommitLog()
 			rf.DPrintf("update commitIndex %d", rf.commitIndex)
 		}
 	} else {
@@ -212,7 +214,7 @@ func (rf *Raft) sendLog(peer int, logs []LogEntry) {
 	rf.Unlock("sendLog")
 
 	response := new(AppendEntriesReply)
-	rf.DPrintf("send log to %d", peer)
+	rf.DPrintf("send log %d-%d to %d", logs[0].CommandIndex, logs[len(logs)-1].CommandIndex, peer)
 	if rf.sendAppendEntries(peer, request, response) {
 		rf.Lock("recvAppendEntries")
 		defer rf.Unlock("recvAppendEntries")
@@ -271,12 +273,12 @@ func (rf *Raft) sendHeartbeat(peer int) {
 	}
 }
 
-func (rf *Raft) broadcastHeartbeat(noOp bool) {
+func (rf *Raft) broadcastHeartbeat(syncCommit bool) {
 	for peer := range rf.peers {
 		if peer == rf.me {
 			continue
 		}
-		if noOp {
+		if syncCommit {
 			// 成为 Leader 后发送最后一条日志来触发提交
 			lastLog := rf.getLastLog()
 			if lastLog.CommandIndex == 0 {
@@ -415,6 +417,8 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply
 	rf.Lock("RequestVote")
 	defer rf.Unlock("RequestVote")
 
+	rf.checkTerm(request.CandidateId, request.Term)
+
 	// 对端任期小或者本端已经投票过了，那么拒绝投票
 	if request.Term < rf.currentTerm || (request.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != request.CandidateId) {
 		rf.DPrintf("already vote for %d, refuse to vote for %d", rf.votedFor, request.CandidateId)
@@ -430,7 +434,6 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply
 		return
 	}
 
-	rf.checkTerm(request.CandidateId, request.Term)
 	// 投票，重复回复也没事，TCP 会帮你处理掉的
 	rf.DPrintf("vote for %d", request.CandidateId)
 	rf.votedFor = request.CandidateId
@@ -465,12 +468,14 @@ func (rf *Raft) startElection() {
 				if request.Term < rf.currentTerm {
 					return
 				}
+
+				rf.checkTerm(peer, response.Term)
+
 				// 已经不是竞选者角色了也不用理会回复
 				if rf.role != Candidate {
 					return
 				}
 
-				rf.checkTerm(peer, response.Term)
 				if response.VoteGranted {
 					// 获得选票
 					grantedVotes += 1
@@ -483,7 +488,6 @@ func (rf *Raft) startElection() {
 							rf.nextIndex[i] = len(rf.log)
 							rf.matchIndex[i] = 0
 						}
-						// no-op 去触发提交
 						rf.broadcastHeartbeat(true)
 					}
 				}
@@ -581,6 +585,9 @@ func (rf *Raft) commitCheck(commitIndex int) bool {
 	quotaNum := len(rf.peers)/2 + 1
 	n := 0
 	for idx, matchIndex := range rf.matchIndex {
+		//if rf.log[commitIndex].Term != rf.currentTerm {
+		//	continue
+		//}
 		if idx == rf.me {
 			n += 1
 		} else if matchIndex >= commitIndex {
@@ -602,7 +609,7 @@ func (rf *Raft) commitLog() {
 	}
 	// 判断最新添加的日志是否可以提交
 	count := 5
-	for i := high; i > 0 && count > 0; i-- {
+	for i := high; i >= low && count > 0; i-- {
 		count--
 		if rf.commitCheck(i) {
 			rf.commitIndex = i
