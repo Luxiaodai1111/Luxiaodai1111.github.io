@@ -6,6 +6,7 @@
 func (z *erasureServerPools) NSScanner(ctx context.Context, bf *bloomFilter, updates chan<- DataUsageInfo, wantCycle uint32) error {
    ...
 
+   // 列出所有的桶
    allBuckets, err := z.ListBuckets(ctx)
    ...
 
@@ -37,7 +38,7 @@ func (z *erasureServerPools) NSScanner(ctx context.Context, bf *bloomFilter, upd
                   mu.Unlock()
                }
             }()
-            // Start scanner. Blocks until done.
+            // 开始扫描，会阻塞到完成
             err := erObj.nsScanner(ctx, allBuckets, bf, wantCycle, updates)
             ...
          }(len(results)-1, erObj)
@@ -60,17 +61,13 @@ func (z *erasureServerPools) NSScanner(ctx context.Context, bf *bloomFilter, upd
 }
 ```
 
-对于这一长串代码，其实我们只需要关心 `erObj.nsScanner` 在干什么就好了，在对每个池的每个 set 进行 nsScanner 之后，结果保存在了 results中，因为每个池或者说每个 drive 都包含相同的桶，所以后面需要对结果进行一些合并处理。
+对于这一长串代码，其实我们只需要关心 `erObj.nsScanner` 在干什么就好了，在对每个池的每个 set 进行 nsScanner 之后，结果保存在了 results 中，因为每个池或者说每个 drive 都包含相同的桶，所以后面需要对结果进行一些合并处理。
 
 set 的 nsScanner 我们分为三部分来看，第一部分是初始化，第二部分是 dataUsageCache 处理，第三部分是磁盘扫描。
 
 ```go
 func (er erasureObjects) nsScanner(ctx context.Context, buckets []BucketInfo, bf *bloomFilter, wantCycle uint32, updates chan<- dataUsageCache) error {
-   if len(buckets) == 0 {
-      return nil
-   }
-
-   // Collect disks we can use.
+   ...
    // 故障和正在修复的磁盘不去扫描
    disks, healing := er.getOnlineDisksWithHealing()
    if len(disks) == 0 {
@@ -259,7 +256,7 @@ func (s *xlStorage) NSScanner(ctx context.Context, cache dataUsageCache, updates
 }
 ```
 
-我们看看 scanDataFolder 是怎么扫描目录的。这里传入了一个匿名函数，这个函数比较长，后面分析的时候再贴出来。这里初始化了 folderScanner 结构体，并把传入的匿名函数赋给了 getSize 字段，然后又跳入 s.scanFolder（还没进入主题，我都快被跳烦了……）
+我们看看 scanDataFolder 是怎么扫描目录的。这里传入了一个匿名函数，这个函数比较长，后面分析的时候再贴出来。scanDataFolder 初始化了 folderScanner 结构体，并把传入的匿名函数赋给了 getSize 字段，然后又跳入 s.scanFolder（还没进入主题，我都快被跳烦了……）
 
 ```go
 func scanDataFolder(ctx context.Context, poolIdx, setIdx int, basePath string, cache dataUsageCache, getSize getSizeFn) 
@@ -294,7 +291,19 @@ func scanDataFolder(ctx context.Context, poolIdx, setIdx int, basePath string, c
 }
 ```
 
-先不看了，头大了……
+下面来介绍真正干活的部分。
+
+
+
+
+
+---
+
+# scanFolder
+
+
+
+
 
 
 
