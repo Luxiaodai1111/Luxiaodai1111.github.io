@@ -301,11 +301,269 @@ func scanDataFolder(ctx context.Context, poolIdx, setIdx int, basePath string, c
 
 # scanFolder
 
+scanFolder 代码精简如下：
 
+```go
+func (f *folderScanner) scanFolder(ctx context.Context, folder cachedFolder, into *dataUsageEntry) error {
+   done := ctx.Done()
+   scannerLogPrefix := color.Green("folder-scanner:")
+   thisHash := hashPath(folder.name)
+   // Store initial compaction state.
+   wasCompacted := into.Compacted
+   atomic.AddUint64(&globalScannerStats.accFolders, 1)
 
+   for {
+      select {
+      case <-done:
+         return ctx.Err()
+      default:
+      }
+      existing, ok := f.oldCache.Cache[thisHash.Key()]
+      var abandonedChildren dataUsageHashMap
+      if !into.Compacted {
+         abandonedChildren = f.oldCache.findChildrenCopy(thisHash)
+      }
 
+      // 如果该前缀有生命周期规则，则删除过滤器
+      filter := f.withFilter
+      _, prefix := path2BucketObjectWithBasePath(f.root, folder.name)
+      var activeLifeCycle *lifecycle.Lifecycle
+      if f.oldCache.Info.lifeCycle != nil && f.oldCache.Info.lifeCycle.HasActiveRules(prefix, true) {
+         activeLifeCycle = f.oldCache.Info.lifeCycle
+         filter = nil
+      }
+       
+      // 如果该前缀有复制规则，删除过滤器
+      var replicationCfg replicationConfig
+      if !f.oldCache.Info.replication.Empty() && f.oldCache.Info.replication.Config.HasActiveRules(prefix, true) {
+         replicationCfg = f.oldCache.Info.replication
+         filter = nil
+      }
+       
+      // 检查是否可以根据 bloom filter 跳过扫描
+      if filter != nil && ok && existing.Compacted {
+         // If folder isn't in filter and we have data, skip it completely.
+         ...
+      }
+      scannerSleeper.Sleep(ctx, dataScannerSleepPerFolder)
 
+      var existingFolders, newFolders []cachedFolder
+      var foundObjects bool
+      // 对目录里的每个条目应用 fn 函数，不对目录本身进行递归，如果 dirPath 不存在，这个函数不会返回错误。
+      err := readDirFn(path.Join(f.root, folder.name), func(entName string, typ os.FileMode) error {
+         ...
+      })
+      if err != nil {
+         return err
+      }
 
+      if foundObjects && globalIsErasure {
+         // If we found an object in erasure mode, we skip subdirs (only datadirs)...
+         break
+      }
+
+      // 如果我们有很多子目录，就需要压缩
+      if !into.Compacted &&
+         f.newCache.Info.Name != folder.name &&
+         len(existingFolders)+len(newFolders) >= dataScannerCompactAtFolders {
+         into.Compacted = true
+         newFolders = append(newFolders, existingFolders...)
+         existingFolders = nil
+      }
+
+      // scanFolder 函数，后续分析
+      scanFolder := func(folder cachedFolder) {
+         ...
+      }
+
+      // Transfer existing
+      if !into.Compacted {
+         for _, folder := range existingFolders {
+            h := hashPath(folder.name)
+            f.updateCache.copyWithChildren(&f.oldCache, h, folder.parent)
+         }
+      }
+      // Scan new...
+      for _, folder := range newFolders {
+         ...
+         scanFolder(folder)
+         ...
+      }
+
+      // Scan existing...
+      for _, folder := range existingFolders {
+         ...
+         scanFolder(folder)
+         ...
+      }
+
+      // Scan for healing
+      if f.healObjectSelect == 0 || len(abandonedChildren) == 0 {
+         // 没有要修复的对象, return now.
+         break
+      }
+
+      objAPI, ok := newObjectLayerFn().(*erasureServerPools)
+      if !ok || len(f.disks) == 0 || f.disksQuorum == 0 {
+         break
+      }
+
+      bgSeq, found := globalBackgroundHealState.getHealSequenceByToken(bgHealingUUID)
+      if !found {
+         break
+      }
+
+      /*
+       * 在'abandonedChildren'中剩下的都是这一层的文件夹，这些文件夹在之前的运行中存在，但现在没有被发现。
+       * 这可能是由于两个原因。
+       * 1）文件夹/对象被删除了。
+       * 2）我们来自另一个磁盘，这个磁盘错过了写入。
+       * 因此，我们进行了一次修复检查。如果没有恢复，我们就删除这个文件夹，并假定它被删除了。这意味着下次运行时将不会再寻找它。
+       */
+      resolver := metadataResolutionParams{
+         dirQuorum: f.disksQuorum,
+         objQuorum: f.disksQuorum,
+         bucket:    "",
+         strict:    false,
+      }
+
+      healObjectsPrefix := color.Green("healObjects:")
+      for k := range abandonedChildren {
+         // 相关操作，后续分析
+         ...
+      }
+      break
+   }
+   // compact 相关操作
+   ...
+
+   return nil
+}
+```
+
+readDirFn 传入的匿名函数如下：
+
+```go
+func(entName string, typ os.FileMode) error {
+   // Parse
+   entName = pathClean(path.Join(folder.name, entName))
+   if entName == "" || entName == folder.name {
+      if f.dataUsageScannerDebug {
+         console.Debugf(scannerLogPrefix+" no entity (%s,%s)\n", f.root, entName)
+      }
+      return nil
+   }
+   bucket, prefix := path2BucketObjectWithBasePath(f.root, entName)
+   if bucket == "" {
+      if f.dataUsageScannerDebug {
+         console.Debugf(scannerLogPrefix+" no bucket (%s,%s)\n", f.root, entName)
+      }
+      return errDoneForNow
+   }
+
+   if isReservedOrInvalidBucket(bucket, false) {
+      if f.dataUsageScannerDebug {
+         console.Debugf(scannerLogPrefix+" invalid bucket: %v, entry: %v\n", bucket, entName)
+      }
+      return errDoneForNow
+   }
+
+   select {
+   case <-done:
+      return errDoneForNow
+   default:
+   }
+
+   if typ&os.ModeDir != 0 {
+      h := hashPath(entName)
+      _, exists := f.oldCache.Cache[h.Key()]
+      if h == thisHash {
+         return nil
+      }
+      this := cachedFolder{name: entName, parent: &thisHash, objectHealProbDiv: folder.objectHealProbDiv}
+      delete(abandonedChildren, h.Key()) // h.Key() already accounted for.
+      if exists {
+         existingFolders = append(existingFolders, this)
+         f.updateCache.copyWithChildren(&f.oldCache, h, &thisHash)
+      } else {
+         newFolders = append(newFolders, this)
+      }
+      return nil
+   }
+
+   // Dynamic time delay.
+   wait := scannerSleeper.Timer(ctx)
+
+   // Get file size, ignore errors.
+   item := scannerItem{
+      Path:        path.Join(f.root, entName),
+      Typ:         typ,
+      bucket:      bucket,
+      prefix:      path.Dir(prefix),
+      objectName:  path.Base(entName),
+      debug:       f.dataUsageScannerDebug,
+      lifeCycle:   activeLifeCycle,
+      replication: replicationCfg,
+      heal:        thisHash.modAlt(f.oldCache.Info.NextCycle/folder.objectHealProbDiv, f.healObjectSelect/folder.objectHealProbDiv) && globalIsErasure,
+   }
+   // if the drive belongs to an erasure set
+   // that is already being healed, skip the
+   // healing attempt on this drive.
+   item.heal = item.heal && f.healObjectSelect > 0
+
+   sz, err := f.getSize(item)
+   if err != nil {
+      wait() // wait to proceed to next entry.
+      if err != errSkipFile && f.dataUsageScannerDebug {
+         console.Debugf(scannerLogPrefix+" getSize \"%v/%v\" returned err: %v\n", bucket, item.objectPath(), err)
+      }
+      return nil
+   }
+
+   // successfully read means we have a valid object.
+   foundObjects = true
+   // Remove filename i.e is the meta file to construct object name
+   item.transformMetaDir()
+
+   // Object already accounted for, remove from heal map,
+   // simply because getSize() function already heals the
+   // object.
+   delete(abandonedChildren, path.Join(item.bucket, item.objectPath()))
+
+   into.addSizes(sz)
+   into.Objects++
+
+   wait() // wait to proceed to next entry.
+
+   return nil
+})
+```
+
+scanFolder 递归调用 f.scanFolder，头大……
+
+```go
+scanFolder := func(folder cachedFolder) {
+   if contextCanceled(ctx) {
+      return
+   }
+   dst := into
+   if !into.Compacted {
+      dst = &dataUsageEntry{Compacted: false}
+   }
+   if err := f.scanFolder(ctx, folder, dst); err != nil {
+      logger.LogIf(ctx, err)
+      return
+   }
+   if !into.Compacted {
+      h := dataUsageHash(folder.name)
+      into.addChild(h)
+      // We scanned a folder, optionally send update.
+      f.updateCache.deleteRecursive(h)
+      f.updateCache.copyWithChildren(&f.newCache, h, folder.parent)
+      f.sendUpdate()
+   }
+}
+```
 
 
 

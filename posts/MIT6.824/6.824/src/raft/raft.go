@@ -122,6 +122,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 	}
 
 	rf.checkTerm(request.LeaderId, request.Term)
+	response.Term = rf.currentTerm
 
 	if Debug {
 		logs := "log:"
@@ -136,11 +137,19 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 	// 检查日志
 	rf.DPrintf("PrevLogIndex: %d, PrevLogTerm: %d, LeaderCommit: %d", request.PrevLogIndex, request.PrevLogTerm, request.LeaderCommit)
 	if len(rf.log) > request.PrevLogIndex && rf.log[request.PrevLogIndex].Term == request.PrevLogTerm {
-		response.Success = true
-		rf.electionTimer.Reset(rf.ElectionTimeout())
-
 		// 追加日志
 		if len(request.Entries) > 0 {
+			// 本地日志要更新一些，拒绝接收
+			lastLog := rf.getLastLog()
+			lastEntry := request.Entries[len(request.Entries)-1]
+			if lastLog.Term > lastEntry.Term || (lastLog.Term == lastEntry.Term && lastLog.CommandIndex > lastEntry.CommandIndex) {
+				rf.DPrintf("local log is newer than %d, refuse to recv log", request.LeaderId)
+				response.Success = false
+				response.ConflictTerm = request.PrevLogTerm
+				response.ConflictIndex = request.PrevLogIndex
+				return
+			}
+			// 追加日志
 			rf.log = append(rf.log[:request.PrevLogIndex+1], request.Entries...)
 			rf.DPrintf("====== append log %d-%d ======",
 				request.Entries[0].CommandIndex, request.Entries[len(request.Entries)-1].CommandIndex)
@@ -158,6 +167,10 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 			rf.applyCommitLog()
 			rf.DPrintf("update commitIndex %d", rf.commitIndex)
 		}
+
+		response.Success = true
+		rf.role = Follower
+		rf.electionTimer.Reset(rf.ElectionTimeout())
 	} else {
 		rf.DPrintf("log mismatch")
 		// 如果自己不存在索引、任期和 prevLogIndex、 prevLogItem 匹配的日志返回 false。
@@ -184,8 +197,6 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 		}
 	}
 
-	response.Term = rf.currentTerm
-
 	return
 }
 
@@ -201,6 +212,11 @@ func (rf *Raft) checkTerm(peer int, term int) {
 
 func (rf *Raft) sendLog(peer int, logs []LogEntry) {
 	rf.Lock("sendLog")
+	if rf.role != Leader {
+		rf.Unlock("sendLog")
+		rf.DPrintf("now is not leader, cancel send log")
+		return
+	}
 	prevLog := rf.log[logs[0].CommandIndex-1]
 	request := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
@@ -238,6 +254,10 @@ func (rf *Raft) sendLog(peer int, logs []LogEntry) {
 				// 如果冲突，则从冲突日志的上一条发起
 				rf.nextIndex[peer] = response.ConflictIndex - 1
 			}
+			// 索引至少从 1 开始
+			if rf.nextIndex[peer] < 1 {
+				rf.nextIndex[peer] = 1
+			}
 
 			rf.DPrintf("peer %d's nextIndex is %d", peer, rf.nextIndex[peer])
 		}
@@ -250,6 +270,11 @@ func (rf *Raft) sendLog(peer int, logs []LogEntry) {
 
 func (rf *Raft) sendHeartbeat(peer int) {
 	rf.Lock("sendHeartbeat")
+	if rf.role != Leader {
+		rf.Unlock("sendHeartbeat")
+		rf.DPrintf("now is not leader, cancel sendHeartbeat")
+		return
+	}
 	request := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
@@ -327,12 +352,12 @@ type Raft struct {
 }
 
 func (rf *Raft) HeartbeatTimeout() time.Duration {
-	return time.Millisecond * 10
+	return time.Millisecond * 100
 }
 
 func (rf *Raft) ElectionTimeout() time.Duration {
 	rand.Seed(time.Now().Unix() + int64(rf.me))
-	return time.Millisecond * time.Duration(100+rand.Int63n(100))
+	return time.Millisecond * time.Duration(500+rand.Int63n(500))
 }
 
 // return currentTerm and whether this server
@@ -588,9 +613,6 @@ func (rf *Raft) commitCheck(commitIndex int) bool {
 	quotaNum := len(rf.peers)/2 + 1
 	n := 0
 	for idx, matchIndex := range rf.matchIndex {
-		//if rf.log[commitIndex].Term != rf.currentTerm {
-		//	continue
-		//}
 		if idx == rf.me {
 			n += 1
 		} else if matchIndex >= commitIndex {
@@ -610,31 +632,13 @@ func (rf *Raft) commitLog() {
 	if low > high {
 		return
 	}
-	// 判断最新添加的日志是否可以提交
-	count := 5
-	for i := high; i >= low && count > 0; i-- {
-		count--
+	// 只能提交当前任期的日志
+	for i := high; i >= low && rf.log[i].Term == rf.currentTerm; i-- {
 		if rf.commitCheck(i) {
 			rf.commitIndex = i
 			rf.DPrintf("====== commit log %d ======", i)
 			return
 		}
-	}
-
-	// 二分快速查找一个可以提交的日志
-	nextCommitIndex := (low + high) / 2
-	for ; low != high; nextCommitIndex = (low + high) / 2 {
-		if rf.commitCheck(nextCommitIndex) {
-			rf.commitIndex = nextCommitIndex
-			rf.DPrintf("====== commit log %d ======", nextCommitIndex)
-			return
-		} else {
-			high = nextCommitIndex
-		}
-	}
-	if rf.commitCheck(low) {
-		rf.commitIndex = low
-		rf.DPrintf("====== commit log %d ======", low)
 	}
 
 	return
@@ -650,6 +654,7 @@ func (rf *Raft) ticker() {
 			// 开始竞选，任期加一
 			rf.role = Candidate
 			rf.currentTerm += 1
+			rf.votedFor = -1
 			rf.startElection()
 			rf.electionTimer.Reset(rf.ElectionTimeout())
 			rf.Unlock("electionTimer")
