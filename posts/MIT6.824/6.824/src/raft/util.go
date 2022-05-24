@@ -22,3 +22,14 @@ func (rf *Raft) DPrintf(format string, a ...interface{}) {
 	}
 	return
 }
+
+func (rf *Raft) printLog() {
+	if Debug {
+		logs := "log:"
+		for _, l := range rf.log {
+			logs += fmt.Sprintf("(%d, %d)", l.Term, l.CommandIndex)
+		}
+		logs += "\n"
+		rf.DPrintf("%s", logs)
+	}
+}

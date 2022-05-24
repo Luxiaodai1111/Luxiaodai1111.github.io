@@ -18,7 +18,8 @@ package raft
 //
 
 import (
-	"fmt"
+	"6.824/labgob"
+	"bytes"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -124,14 +125,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 	rf.checkTerm(request.LeaderId, request.Term)
 	response.Term = rf.currentTerm
 
-	if Debug {
-		logs := "log:"
-		for _, l := range rf.log {
-			logs += fmt.Sprintf("(%d, %d)", l.Term, l.CommandIndex)
-		}
-		logs += "\n"
-		rf.DPrintf("%s", logs)
-	}
+	rf.printLog()
 	rf.DPrintf("commitIndex: %d, lastApplied: %d", rf.commitIndex, rf.lastApplied)
 
 	// 检查日志
@@ -151,6 +145,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 			}
 			// 追加日志
 			rf.log = append(rf.log[:request.PrevLogIndex+1], request.Entries...)
+			rf.persist()
 			rf.DPrintf("====== append log %d-%d ======",
 				request.Entries[0].CommandIndex, request.Entries[len(request.Entries)-1].CommandIndex)
 		}
@@ -163,8 +158,6 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 			} else {
 				rf.commitIndex = request.LeaderCommit
 			}
-			// 更新状态机
-			rf.applyCommitLog()
 			rf.DPrintf("update commitIndex %d", rf.commitIndex)
 		}
 
@@ -179,6 +172,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 		if len(rf.log) > request.PrevLogIndex && rf.log[request.PrevLogIndex].Term != request.Term {
 			rf.DPrintf("====== delete log from %d ======", request.PrevLogIndex)
 			rf.log = rf.log[:request.PrevLogIndex]
+			rf.persist()
 		}
 		// 加速日志冲突检查, 获取不大于 request.PrevLogTerm 且包含日志的冲突条目
 		lastLog := rf.getLastLog()
@@ -207,6 +201,7 @@ func (rf *Raft) checkTerm(peer int, term int) {
 		rf.role = Follower
 		rf.currentTerm = term
 		rf.votedFor = -1
+		rf.persist()
 	}
 }
 
@@ -278,8 +273,8 @@ func (rf *Raft) sendHeartbeat(peer int) {
 	request := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
-		PrevLogIndex: 0,
-		PrevLogTerm:  0,
+		PrevLogIndex: rf.matchIndex[peer],
+		PrevLogTerm:  rf.log[rf.matchIndex[peer]].Term,
 		Entries:      nil,
 		LeaderCommit: rf.commitIndex,
 	}
@@ -382,36 +377,48 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
+	//rf.DPrintf("persist currentTerm: %d, votedFor: %d", rf.currentTerm, rf.votedFor)
+	//rf.printLog()
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if e.Encode(rf.currentTerm) != nil ||
+		e.Encode(rf.votedFor) != nil ||
+		e.Encode(rf.log) != nil {
+		rf.DPrintf("------ persist encode error ------")
+	}
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
+	rf.DPrintf("====== readPersist ======")
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil {
+		rf.DPrintf("------ decode error ------")
+		rf.Kill()
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+		rf.DPrintf("====== readPersist currentTerm: %d, votedFor: %d ======", rf.currentTerm, rf.votedFor)
+		rf.printLog()
+	}
 }
 
 //
@@ -464,6 +471,7 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply
 	rf.electionTimer.Reset(rf.ElectionTimeout())
 	rf.role = Follower
 	rf.votedFor = request.CandidateId
+	rf.persist()
 	response.Term, response.VoteGranted = rf.currentTerm, true
 }
 
@@ -479,6 +487,7 @@ func (rf *Raft) startElection() {
 	grantedVotes := 1
 	quotaNum := len(rf.peers)/2 + 1
 	rf.votedFor = rf.me
+	rf.persist()
 
 	for peer := range rf.peers {
 		if peer == rf.me {
@@ -557,6 +566,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Command:      command,
 		}
 		rf.log = append(rf.log, log)
+		rf.persist()
 		rf.plug += 1
 		if rf.plug >= PlugNumber {
 			rf.plug = 0
@@ -585,6 +595,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	rf.Lock("Kill")
+	defer rf.Unlock("Kill")
+	rf.persist()
 }
 
 func (rf *Raft) killed() bool {
@@ -592,18 +605,27 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+// 更新状态机
 func (rf *Raft) applyCommitLog() {
-	for idx := rf.lastApplied + 1; idx <= rf.commitIndex; idx++ {
-		select {
-		case rf.applyCh <- ApplyMsg{
-			CommandValid: true,
-			Command:      rf.log[idx].Command,
-			CommandIndex: rf.log[idx].CommandIndex,
-		}:
-			rf.DPrintf("====== apply commited log %d ======", idx)
-			rf.lastApplied = idx
-		default:
-			return
+	for rf.killed() == false {
+		time.Sleep(time.Millisecond)
+		if rf.lastApplied < rf.commitIndex {
+			rf.Lock("applyCommitLog")
+			for idx := rf.lastApplied + 1; idx <= rf.commitIndex; idx++ {
+				select {
+				case rf.applyCh <- ApplyMsg{
+					CommandValid: true,
+					Command:      rf.log[idx].Command,
+					CommandIndex: rf.log[idx].CommandIndex,
+				}:
+					rf.DPrintf("====== apply committed log %d ======", idx)
+					rf.lastApplied = idx
+				default:
+					goto Unlock
+				}
+			}
+		Unlock:
+			rf.Unlock("applyCommitLog")
 		}
 	}
 }
@@ -655,6 +677,7 @@ func (rf *Raft) ticker() {
 			rf.role = Candidate
 			rf.currentTerm += 1
 			rf.votedFor = -1
+			rf.persist()
 			rf.startElection()
 			rf.electionTimer.Reset(rf.ElectionTimeout())
 			rf.Unlock("electionTimer")
@@ -667,8 +690,6 @@ func (rf *Raft) ticker() {
 				rf.broadcastHeartbeat(false)
 				rf.electionTimer.Reset(rf.ElectionTimeout())
 			}
-			// 更新状态机
-			rf.applyCommitLog()
 			rf.heartbeatTimer.Reset(rf.HeartbeatTimeout())
 			rf.Unlock("heartbeatTimer")
 		}
@@ -713,6 +734,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+
+	go rf.applyCommitLog()
 
 	return rf
 }
