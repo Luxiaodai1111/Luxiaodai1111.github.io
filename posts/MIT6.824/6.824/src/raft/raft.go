@@ -107,9 +107,8 @@ func (rf *Raft) getFirstLog(term int) (ConflictIndex int) {
 		}
 	}
 
-	// 没有 BUG 的话永远不会走到这
 	rf.DPrintf("%+v %d", rf.log, middle)
-	return -1
+	return 0
 }
 
 func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntriesReply) {
@@ -180,7 +179,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 			if rf.log[i].Term <= request.PrevLogTerm {
 				response.ConflictTerm = rf.log[i].Term
 				response.ConflictIndex = rf.getFirstLog(rf.log[i].Term)
-				if response.ConflictIndex == request.PrevLogIndex {
+				if response.ConflictIndex == request.PrevLogIndex && response.ConflictIndex > 0 {
 					// 获取含有日志的上一个任期
 					prevLog := rf.log[response.ConflictIndex-1]
 					response.ConflictTerm = prevLog.Term
@@ -273,8 +272,8 @@ func (rf *Raft) sendHeartbeat(peer int) {
 	request := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
-		PrevLogIndex: rf.matchIndex[peer],
-		PrevLogTerm:  rf.log[rf.matchIndex[peer]].Term,
+		PrevLogIndex: rf.nextIndex[peer] - 1,
+		PrevLogTerm:  rf.log[rf.nextIndex[peer]-1].Term,
 		Entries:      nil,
 		LeaderCommit: rf.commitIndex,
 	}

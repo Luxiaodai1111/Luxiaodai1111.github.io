@@ -125,12 +125,6 @@ func TestManyElections2A(t *testing.T) {
 }
 
 func TestBasicAgree2B(t *testing.T) {
-	defer func() {
-		if Debug {
-			time.Sleep(DebugTime)
-		}
-	}()
-
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -158,12 +152,6 @@ func TestBasicAgree2B(t *testing.T) {
 // each command is sent to each peer just once.
 //
 func TestRPCBytes2B(t *testing.T) {
-	defer func() {
-		if Debug {
-			time.Sleep(DebugTime)
-		}
-	}()
-
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -288,12 +276,6 @@ func For2023TestLeaderFailure2B(t *testing.T) {
 // disconnect and re-connect.
 //
 func TestFailAgree2B(t *testing.T) {
-	defer func() {
-		if Debug {
-			time.Sleep(DebugTime)
-		}
-	}()
-
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -328,12 +310,6 @@ func TestFailAgree2B(t *testing.T) {
 }
 
 func TestFailNoAgree2B(t *testing.T) {
-	defer func() {
-		if Debug {
-			time.Sleep(DebugTime)
-		}
-	}()
-
 	servers := 5
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -385,12 +361,6 @@ func TestFailNoAgree2B(t *testing.T) {
 }
 
 func TestConcurrentStarts2B(t *testing.T) {
-	defer func() {
-		if Debug {
-			time.Sleep(DebugTime)
-		}
-	}()
-
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -492,12 +462,6 @@ loop:
 }
 
 func TestRejoin2B(t *testing.T) {
-	defer func() {
-		if Debug {
-			time.Sleep(DebugTime)
-		}
-	}()
-
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -536,12 +500,6 @@ func TestRejoin2B(t *testing.T) {
 }
 
 func TestBackup2B(t *testing.T) {
-	defer func() {
-		if Debug {
-			time.Sleep(DebugTime)
-		}
-	}()
-
 	servers := 5
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -551,14 +509,12 @@ func TestBackup2B(t *testing.T) {
 	cfg.one(rand.Int(), servers, true)
 
 	// put leader and one follower in a partition
-	fmt.Println("******", "put leader and one follower in a partition")
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect((leader1 + 2) % servers)
 	cfg.disconnect((leader1 + 3) % servers)
 	cfg.disconnect((leader1 + 4) % servers)
 
 	// submit lots of commands that won't commit
-	fmt.Println("******", "submit lots of commands that won't commit")
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader1].Start(rand.Int())
 	}
@@ -569,19 +525,16 @@ func TestBackup2B(t *testing.T) {
 	cfg.disconnect((leader1 + 1) % servers)
 
 	// allow other partition to recover
-	fmt.Println("******", "allow other partition to recover")
 	cfg.connect((leader1 + 2) % servers)
 	cfg.connect((leader1 + 3) % servers)
 	cfg.connect((leader1 + 4) % servers)
 
 	// lots of successful commands to new group.
-	fmt.Println("******", "lots of successful commands to new group.")
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
 
 	// now another partitioned leader and one follower
-	fmt.Println("******", "now another partitioned leader and one follower")
 	leader2 := cfg.checkOneLeader()
 	other := (leader1 + 2) % servers
 	if leader2 == other {
@@ -590,7 +543,6 @@ func TestBackup2B(t *testing.T) {
 	cfg.disconnect(other)
 
 	// lots more commands that won't commit
-	fmt.Println("******", "lots more commands that won't commit")
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader2].Start(rand.Int())
 	}
@@ -598,7 +550,6 @@ func TestBackup2B(t *testing.T) {
 	time.Sleep(RaftElectionTimeout / 2)
 
 	// bring original leader back to life,
-	fmt.Println("******", "bring original leader back to life")
 	for i := 0; i < servers; i++ {
 		cfg.disconnect(i)
 	}
@@ -607,13 +558,11 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect(other)
 
 	// lots of successful commands to new group.
-	fmt.Println("******", "lots of successful commands to new group.")
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
 
 	// now everyone
-	fmt.Println("******", "now everyone")
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
 	}
@@ -623,12 +572,6 @@ func TestBackup2B(t *testing.T) {
 }
 
 func TestCount2B(t *testing.T) {
-	defer func() {
-		if Debug {
-			time.Sleep(DebugTime)
-		}
-	}()
-
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()

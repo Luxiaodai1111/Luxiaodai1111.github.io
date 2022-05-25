@@ -60,7 +60,9 @@
 >
 > ## [🧪 Lab 02：Part 2A](posts/MIT6.824/Lab/Lab02-Raft-part2A.md)
 >
-> ## [🧪 Lab 02：Part 2B](posts/MIT6.824/Lab/Lab02-Raft-part2B.md)
+> ## [🧪 Lab 02：Part 2B / 2C](posts/MIT6.824/Lab/Lab02-Raft-part2B-C.md)
+>
+> ## [🧪 Lab 02：Part 2D](posts/MIT6.824/Lab/Lab02-Raft-part2D.md)
 
 ​	
 
