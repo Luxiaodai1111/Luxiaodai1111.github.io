@@ -667,11 +667,11 @@ Raft 的日志在正常操作中不断地增长，但是在实际的系统中，
 
 >The leader uses a new RPC called InstallSnapshot to send snapshots to followers that are too far behind; see Figure 13. When a follower receives a snapshot with this RPC, it must decide what to do with its existing log entries. Usually the snapshot will contain new information not already in the recipient’s log. In this case, the follower discards its entire log; it is all superseded by the snapshot and may possibly have uncommitted entries that conflict with the snapshot. If instead the follower receives a snapshot that describes a prefix of its log (due to retransmission or by mistake), then log entries covered by the snapshot are deleted but entries following the snapshot are still valid and must be retained.
 
-在这种情况下领导者使用一种叫做安装快照的新的 RPC 来发送快照给太落后的跟随者；见图 13。当跟随者通过这种 RPC 接收到快照时，他必须自己决定对于已经存在的日志该如何处理。通常快照会包含没有在接收者日志中存在的信息。在这种情况下，跟随者丢弃其整个日志；它全部被快照取代，并且可能包含与快照冲突的未提交条目。如果接收到的快照是自己日志的前面部分（由于网络重传或者错误），那么被快照包含的条目将会被全部删除，但是快照后面的条目仍然有效，必须保留。
+在这种情况下领导者使用一种叫做 InstallSnapshot 的新的 RPC 来发送快照给太落后的跟随者；见图 13。当跟随者通过这种 RPC 接收到快照时，他必须自己决定对于已经存在的日志该如何处理。通常快照会包含没有在接收者日志中存在的信息。在这种情况下，跟随者丢弃其整个日志；它全部被快照取代，并且可能包含与快照冲突的未提交条目。如果接收到的快照是自己日志的前面部分（由于网络重传或者错误），那么被快照包含的条目将会被全部删除，但是快照后面的条目仍然有效，必须保留。
 
 ![](Raft-extended/image-20220507153457074.png)
 
-图 13：一个关于安装快照的简要概述。为了便于传输，快照都是被分成分块的；每个分块都给了跟随者生命的迹象，所以跟随者可以重置选举超时计时器。
+图 13：一个关于 InstallSnapshot 的简要概述。为了便于传输，快照被切割成块；每个分块都相当于告诉 follower 主还活着，所以 follower 可以重置选举超时计时器。
 
 **InstallSnapshot RPC**
 
@@ -693,7 +693,7 @@ Raft 的日志在正常操作中不断地增长，但是在实际的系统中，
 
 接收者实现：
 
-1.  如果`term < currentTerm`就立即回复
+1.  如果 `term < currentTerm` 就立即回复
 2.  如果是第一个分块（offset 为 0）就创建一个新的快照
 3.  在指定偏移量写入数据
 4.  如果 done 是 false，则继续等待更多的数据
