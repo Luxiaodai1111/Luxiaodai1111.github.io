@@ -205,16 +205,6 @@ func (rf *Raft) GetState() (int, bool) {
 
 
 
-## 测试框架
-
-
-
-
-
-## RPC 框架
-
-
-
 
 
 ## 总结

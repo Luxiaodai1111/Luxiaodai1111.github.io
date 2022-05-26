@@ -104,11 +104,11 @@ $ for i in {0..10}; do go test; done
 
 ## 结构体设计
 
-本实验只有一个建议，那就是耐心。
+这个实验开始，就各种魔鬼细节了，本实验只有一个建议，那就是耐心。
 
-对于 2B 来说，其实实现都在论文图 2 里提到了，如果有 BUG，请回头仔细看图 2 里的描述你是否真的都实现了。如果 2B 实现正确了，2C 其实就很简单了，只要在 currentTerm，voteFor 和 logs 变化时持久化就可以了，实验没有要求要写磁盘，而是提供了 Persister，示例也写好了。2C 之所以被标记为 hard 大概是因为它的测试条件更苛刻了吧，如果 2B 实现得不对，在这里就会爆出隐藏的问题。
+对于 2B 来说，实现都在论文图 2 里提到了，如果有 BUG，请回头仔细看图 2 里的描述你是否真的都实现了。如果 2B 实现正确了，2C 其实就很简单了，只要在 currentTerm，voteFor 和 logs 变化时持久化就可以了，实验没有要求要写磁盘，而是提供了 Persister，示例也写好了，所以简化了很多。2C 之所以被标记为 hard 大概是因为它的测试条件更苛刻了吧，如果 2B 实现得不对，在这里就会爆出之前没有测出的问题。
 
-好了，这次实验和 2A 相比功能就完善很多，所以我们把结构体成员补上，相比论文，这里只多加了一个 plug 结构体，这是为了性能考虑，当应用发起请求时，如果每条请求我们都发送一条 RPC 那么效率就太低了，所以我们增加了一个阈值，如果请求小于阈值，那么就等心跳去发送日志，如果流量过大，则立马发送日志，这也是 2B 测试里的一项。
+好了，这次实验和 2A 相比功能就完善很多，所以我们把结构体成员补上，相比论文，这里只多加了一个 plug 结构体，这是为了性能考虑，当应用发起请求时，如果每条请求我们都发送一条 RPC 那么效率就太低了，所以我们增加了一个阈值，如果单位时间内请求小于阈值，那么就等心跳去发送日志，如果流量过大，则立马发送日志，这也是 2B 测试里的一项。
 
 ```go
 type LogEntry struct {
@@ -118,46 +118,34 @@ type LogEntry struct {
 }
 
 type Raft struct {
-   mu        sync.Mutex          // Lock to protect shared access to this peer's state
-   peers     []*labrpc.ClientEnd // RPC end points of all peers
-   persister *Persister          // Object to hold this peer's persisted state
-   me        int                 // this peer's index into peers[]
-   dead      int32               // set by Kill()
+	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	peers     []*labrpc.ClientEnd // RPC end points of all peers
+	persister *Persister          // Object to hold this peer's persisted state
+	me        int                 // this peer's index into peers[]
+	dead      int32               // set by Kill()
 
-   role        Role       // 服务器当前角色
-   currentTerm int        // 服务器已知最新的任期，在服务器首次启动时初始化为 0，单调递增
-   votedFor    int        // 当前任期内接受选票的竞选者 Id，如果没有投给任何候选者则为空
-   log         []LogEntry // 日志条目
+	role        Role       // 服务器当前角色
+	currentTerm int        // 服务器已知最新的任期，在服务器首次启动时初始化为 0，单调递增
+	votedFor    int        // 当前任期内接受选票的竞选者 Id，如果没有投给任何候选者则为空
+	log         []LogEntry // 日志条目
 
-   commitIndex int // 已提交的最高的日志条目的索引
-   lastApplied int // 已经被提交到状态机的最后一个日志的索引
+	commitIndex int // 已提交的最高的日志条目的索引
+	lastApplied int // 已经被提交到状态机的最后一个日志的索引
 
-   nextIndex  []int // 对于每一台服务器，下条发送到该机器的日志索引
-   matchIndex []int // 对于每一台服务器，已经复制到该服务器的最高日志条目的索引
+	nextIndex  []int // 对于每一台服务器，下条发送到该机器的日志索引
+	matchIndex []int // 对于每一台服务器，已经复制到该服务器的最高日志条目的索引
 
-   electionTimer  *time.Timer // 选举计时器
-   heartbeatTimer *time.Timer // 心跳计时器
+	electionTimer  *time.Timer // 选举计时器
+	heartbeatTimer *time.Timer // 心跳计时器
 
-   applyCh chan ApplyMsg
-   plug    int // 心跳时间内积攒一定数目的日志再一起发送
+	applyCh chan ApplyMsg
+	plug    int // 心跳时间内积攒一定数目的日志再一起发送
 }
 ```
 
-选举的 RPC 结构体和论文一样，日志的 RPC 结构体在回复中增加了两个字段 ConflictTerm 和 ConflictIndex，这为了实现了论文中快速找到冲突条目的优化。
+选举的 RPC 结构体和论文一样，AppendEntriesReply RPC 结构体增加了两个字段 ConflictTerm 和 ConflictIndex，这为了实现了论文中快速找到冲突条目的优化，这里我也实现得非常简单，就是按论文里任期来跳着找。
 
 ```go
-type RequestVoteArgs struct {
-   Term         int // 候选者的任期号
-   CandidateId  int // 请求选票的候选者的 ID
-   LastLogIndex int // 候选者的最后日志条目的索引值
-   LastLogTerm  int // 候选者最后日志条目的任期号
-}
-
-type RequestVoteReply struct {
-   Term        int  // 当前任期号，以便于候选者去更新自己的任期号
-   VoteGranted bool // 候选者赢得了此张选票时为 true
-}
-
 type AppendEntriesArgs struct {
 	Term         int        // leader 任期
 	LeaderId     int        // 用来 follower 把客户端请求重定向到 leader
@@ -173,15 +161,25 @@ type AppendEntriesReply struct {
 	ConflictTerm  int  // 告诉 Leader 下次检查的 ConflictTerm
 	ConflictIndex int  // ConflictTerm 任期内最大的 Index
 }
+
+type RequestVoteArgs struct {
+	Term         int // 候选者的任期号
+	CandidateId  int // 请求选票的候选者的 ID
+	LastLogIndex int // 候选者的最后日志条目的索引值
+	LastLogTerm  int // 候选者最后日志条目的任期号
+}
+
+type RequestVoteReply struct {
+	Term        int  // 当前任期号，以便于候选者去更新自己的任期号
+	VoteGranted bool // 候选者赢得了此张选票时为 true
+}
 ```
 
 
 
-## 初始化设计
+## 初始化
 
-论文日志的索引是从 1 开始的，所以初始化的时候我往日志列表里添加了一条空日志，这条日志也是所有 raft 实例一定能匹配的日志。
-
-applyCh 用于向应用通知已提交的日志，apply 协程用于向 applyCh 发送已提交的日志。
+论文日志的索引是从 1 开始的，所以初始化的时候我往日志列表里添加了一条空日志，这条日志也是所有 raft 实例一定能匹配的日志。applyCh 用于向应用通知已提交的日志，apply 协程用于向 applyCh 发送已提交的日志。
 
 ```go
 func Make(peers []*labrpc.ClientEnd, me int,
@@ -220,9 +218,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 
 
-## 流程设计
+## 流程框架设计
 
-超时的设计和 2A 类似，这里把提交日志的操作与心跳合在一起了，没有用单独的协程去处理。
+这里主要有两个协程，一个用于超时检查，一个用于更新状态机。超时的设计和 2A 类似，这里把提交日志检查的操作与心跳合在一起了，没有用单独的协程去处理。
 
 ```go
 func (rf *Raft) ticker() {
@@ -236,7 +234,7 @@ func (rf *Raft) ticker() {
 			rf.votedFor = -1
 			rf.persist()
 			rf.startElection()
-			rf.electionTimer.Reset(rf.ElectionTimeout())
+			rf.ResetElectionTimeout()
 			rf.Unlock("electionTimer")
 		case <-rf.heartbeatTimer.C:
 			rf.Lock("heartbeatTimer")
@@ -245,7 +243,7 @@ func (rf *Raft) ticker() {
 				rf.commitLog()
 				// Leader 定期发送心跳
 				rf.broadcast(false)
-				rf.electionTimer.Reset(rf.ElectionTimeout())
+				rf.ResetElectionTimeout()
 			}
 			rf.heartbeatTimer.Reset(rf.HeartbeatTimeout())
 			rf.Unlock("heartbeatTimer")
@@ -254,7 +252,65 @@ func (rf *Raft) ticker() {
 }
 ```
 
-请求只要超过半数复制成功就可以提交日志了，已经提交的日志就可以更新状态机，要注意的是别让通道阻塞携程，这里实现和论文一致。
+提交和更新状态机我们下面介绍，选举和 2A 类似，对于发送日志条目，这里和论文一样，没有分开心跳和追加日志。broadcast 会调用 replicate 方法，在 replicate 方法里根据当前状态决定发送的 RPC 请求。
+
+```go
+func (rf *Raft) broadcast(syncCommit bool) {
+   for peer := range rf.peers {
+      if peer == rf.me {
+         continue
+      }
+      go rf.replicate(peer, syncCommit)
+   }
+
+   return
+}
+```
+
+当选主成功后，日志会在两个时机被发送，一个是上层调用 Start 的请求达到阈值，一个就是心跳定时发送 broadcast。对于 Start 发送的请求，我们只需要加入到本地日志列表就可以返回了，等提交后再通过 applyCh 告知应用，这里做的一个小优化就是请求达到阈值才会发送一轮日志，否则就会等到心跳超时发送，这可以大大减少 RPC 交互数目。
+
+```go
+func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	index := -1
+	term := -1
+	isLeader := false
+
+	// Your code here (2B).
+	rf.Lock("Start")
+	defer rf.Unlock("Start")
+	if rf.role == Leader {
+		rf.DPrintf("====== start cmd %+v ======", command)
+		// 添加本地日志
+		log := LogEntry{
+			Term:         rf.currentTerm,
+			CommandIndex: len(rf.log), // 初始有效索引为 1
+			Command:      command,
+		}
+		rf.log = append(rf.log, log)
+		rf.persist()
+		// 请求达到一定数目再一起发送
+		rf.plug += 1
+		if rf.plug >= PlugNumber {
+			rf.plug = 0
+			rf.broadcast(false)
+		}
+		// 后续请求结果会异步发送到 applyCh，index 就是 key
+		index = log.CommandIndex
+		term = log.Term
+		isLeader = true
+	}
+
+	return index, term, isLeader
+}
+```
+
+
+
+
+
+## 提交和更新状态机
+
+请求只要超过半数复制成功就可以提交日志了，但是要注意的是，**只能提交当前任期的日志**，已经提交的日志就可以更新状态机，注意别让通道阻塞协程。这里我没有使用条件变量，而是采用了休眠轮询的方法，实现更简单点。
 
 ```go
 func (rf *Raft) applyCommitLog() {
@@ -309,9 +365,9 @@ func (rf *Raft) commitLog() {
 	if low > high {
 		return
 	}
-	// 只能提交当前任期的日志
+	// 只能提交当前任期的日志，但由于测试没法提交空日志，所以这里有 liveness 的问题
 	for i := high; i >= low && rf.log[i].Term == rf.currentTerm; i-- {
-		if rf.commitCheck(i) {
+		if rf.commitCheck(i) && rf.commitIndex < i {
 			rf.commitIndex = i
 			rf.DPrintf("====== commit log %d ======", i)
 			return
@@ -322,7 +378,15 @@ func (rf *Raft) commitLog() {
 }
 ```
 
-竞选的整体流程和 2A 差不多，因为有了日志，所以需要把日志的信息也添加进去，这里需要注意的是竞选成功后要立马发送追加日志，论文里提到的是在新任期里提交一条空日志，这里我设置了 syncCommit 标志位来发送本地最后一条日志来和对端同步。
+
+
+
+
+## 选举
+
+竞选的整体流程和 2A 差不多，因为需要判断日志新旧，所以需要把日志的信息也添加进去，这里需要注意的是竞选成功后要立马发送追加日志，论文里提到的是在新任期里提交一条空日志，但这样在 2B 测试里会失败，所以这里我设置了 syncCommit 标志位来发送本地最后一条日志来和对端同步。
+
+另外不管是竞选还是发送日志，因为都开启了协程去处理，所以在真正处理前后都要判断自己是否还是应有的角色，并且过期的回复直接忽略即可。
 
 ```go
 func (rf *Raft) startElection() {
@@ -344,12 +408,21 @@ func (rf *Raft) startElection() {
 			continue
 		}
 		go func(peer int) {
+			rf.Lock("sendRequestVote")
+			if rf.role != Candidate {
+				rf.Unlock("sendRequestVote")
+				rf.DPrintf("now is not candidate")
+				return
+			}
+			rf.Unlock("sendRequestVote")
+
 			response := new(RequestVoteReply)
 			rf.DPrintf("send RequestVote %+v to %d", request, peer)
 			if rf.sendRequestVote(peer, request, response) {
 				rf.DPrintf("receive RequestVote from %d, response is %+v", peer, response)
-				rf.Lock("sendRequestVote")
-				defer rf.Unlock("sendRequestVote")
+				rf.Lock("recvRequestVote")
+				defer rf.Unlock("recvRequestVote")
+
 				// 过期轮次的回复直接丢弃
 				if request.Term < rf.currentTerm {
 					return
@@ -359,6 +432,7 @@ func (rf *Raft) startElection() {
 
 				// 已经不是竞选者角色了也不用理会回复
 				if rf.role != Candidate {
+					rf.DPrintf("now is not candidate")
 					return
 				}
 
@@ -369,39 +443,25 @@ func (rf *Raft) startElection() {
 						// 竞选成功
 						rf.DPrintf("====== candidate success ======")
 						rf.role = Leader
-						rf.electionTimer.Reset(rf.ElectionTimeout())
+						rf.ResetElectionTimeout()
 						// 每次选举后重新初始化
 						for i := 0; i < len(rf.peers); i++ {
 							rf.nextIndex[i] = len(rf.log)
 							rf.matchIndex[i] = 0
 						}
+						// 这里应该要提交一条空日志，但是 2B 测试通不过，所以改为发送最后一条日志来同步提交
 						rf.broadcast(true)
 					}
 				}
 			} else {
-				rf.DPrintf("RequestVote RPC failed")
+				rf.DPrintf("RequestVote RPC to %d failed", peer)
 			}
 		}(peer)
 	}
 }
 ```
 
-我将心跳和日志放在一起了，原论文也是在一起的，replicate 会根据各个字段来判断填充什么数据。
-
-```go
-func (rf *Raft) broadcast(syncCommit bool) {
-	for peer := range rf.peers {
-		if peer == rf.me {
-			continue
-		}
-		go rf.replicate(peer, syncCommit)
-	}
-
-	return
-}
-```
-
-选举的处理如下，和论文一致。
+选举的处理如下，和 2A 相比需要判断日志新旧。
 
 ```go
 func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply) {
@@ -428,7 +488,7 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply
 	// 投票，重复回复也没事，TCP 会帮你处理掉的
 	rf.DPrintf("vote for %d", request.CandidateId)
 	// 既然要投票给别人，那自己肯定就不竞选了
-	rf.electionTimer.Reset(rf.ElectionTimeout())
+	rf.ResetElectionTimeout()
 	rf.role = Follower
 	rf.votedFor = request.CandidateId
 	rf.persist()
@@ -436,7 +496,7 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply
 }
 ```
 
-这里我提一下 checkTerm，在 2A 中实现我把选举超时重置也放在了这里面，在当时没什么问题，但在 2B 中，我把他们拆分开了是因为原论文只提了对端任期比自己大时，自己要转变为 Follower，但是没说一定要重置定时器，如果你每次都重置，在有些场景下选主会变得非常被动，比如有个对端一直网络不通，它的任期随着竞选超时变得很大，当网络恢复时，可能有资格成为 Leader 的节点因为任期重置了定时器，那么可能自己一直转变不到竞选者的状态，此时选主变得非常慢。
+这里我提一下 checkTerm，在 2A 中实现我把选举超时重置也放在了这里面，在当时没什么问题，但在 2B 中，我把他们拆分开了是因为原论文只提了对端任期比自己大时，自己要转变为 Follower，但是没说一定要重置定时器，如果你每次都重置，在有些场景下选主会变得非常被动，比如有个对端一直网络不通，它的任期随着竞选超时变得很大，当网络恢复时，可能有资格成为 Leader 的节点因为任期重置了定时器，那么可能自己一直转变不到竞选者的状态。
 
 ```go
 // 如果接收到的 RPC 请求或响应中，任期号 T > currentTerm，则令 currentTerm = T，并切换为 follower 状态
@@ -451,43 +511,40 @@ func (rf *Raft) checkTerm(peer int, term int) {
 }
 ```
 
-当选主成功后，日志会在两个时机被发送，一个是上层调用 Start 的请求达到阈值，一个就是心跳定时发送。对于 Start 发送的请求，我们只需要加入到本地日志列表就可以返回了，等提交后再通过 applyCh 告知应用，这里做的一个小优化就是请求达到阈值才会发送一轮日志，否则就会等到心跳超时发送，这可以大大减少 RPC 交互数目。
+另外竞选的重置应该在如下时机：
+
+1.  开始竞选时
+2.  竞选成功后，且定期重置
+3.  认可别人的日志条目时（包括冲突）
+
+另外 Timer 确实很多坑……
 
 ```go
-func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := false
-
-	// Your code here (2B).
-	rf.Lock("Start")
-	defer rf.Unlock("Start")
-	if rf.role == Leader {
-		rf.DPrintf("====== start cmd %+v ======", command)
-		// 添加本地日志
-		log := LogEntry{
-			Term:         rf.currentTerm,
-			CommandIndex: len(rf.log), // 初始有效索引为 1
-			Command:      command,
-		}
-		rf.log = append(rf.log, log)
-		rf.persist()
-		rf.plug += 1
-		if rf.plug >= PlugNumber {
-			rf.plug = 0
-			rf.broadcast(false)
-		}
-		// 后续请求结果会异步发送到 applyCh，index 就是 key
-		index = log.CommandIndex
-		term = log.Term
-		isLeader = true
-	}
-
-	return index, term, isLeader
+// 如果明确 timer 已经expired，并且 t.C 已经被取空，那么可以直接使用 Reset；
+// 如果程序之前没有从 t.C 中读取过值，这时需要首先调用 Stop()，
+// 如果返回 true，说明 timer 还没有 expire，stop 成功删除 timer，可直接 reset；
+// 如果返回 false，说明 stop 前已经 expire，需要显式 drain channel。
+func (rf *Raft) ResetElectionTimeout() {
+   if !rf.electionTimer.Stop() {
+      // 利用一个 select 来包裹 channel drain，这样无论 channel 中是否有数据，drain 都不会阻塞住
+      select {
+      case <-rf.electionTimer.C:
+      default:
+      }
+   }
+   rf.electionTimer.Reset(rf.ElectionTimeout())
 }
 ```
 
+
+
+
+
+## 发送日志
+
 心跳就是不带日志的 AppendEntries。当 `rf.nextIndex[peer] < len(rf.log)` 时就表示需要发送日志了，这里需要和回复配合来更新下一次要发送的日志条目索引。我这里的逻辑就是如果返回的条目能和本地对应上，那么下次就发送它，如果对应不上，那就发送前一条。因为返回的条目索引都是任期内第一条，所以前一条一定就是上个任期的了。另外如果设置了 syncCommit 标志位，那么就发送最后一条日志来更新 nextIndex 和 matchIndex 信息。
+
+在处理回复时，要注意过期的回复不要理会，而且要考虑 RPC 重复，乱序等问题，比如更新 nextIndex 时，可能你收到了很多条相同的回复，如果你每次都处理，那么你就会发送很多重复的请求出去，这是没必要的。也可能更新过之后，被慢的回复又重新赋值，虽然可能不会错误，但都会降低 RPC 的效率。
 
 ```go
 func (rf *Raft) replicate(peer int, syncCommit bool) {
@@ -517,6 +574,7 @@ func (rf *Raft) replicate(peer int, syncCommit bool) {
 		}
 	}
 
+	// 根据是否携带日志来填充参数
 	if len(request.Entries) > 0 {
 		prevLog := rf.log[request.Entries[0].CommandIndex-1]
 		request.PrevLogIndex = prevLog.CommandIndex
@@ -535,11 +593,19 @@ func (rf *Raft) replicate(peer int, syncCommit bool) {
 		rf.DPrintf("receive AppendEntriesReply from %d, response is %+v", peer, response)
 		rf.Lock("recvAppendEntries")
 		defer rf.Unlock("recvAppendEntries")
+
+		// 过期轮次的回复直接丢弃
+		if request.Term < rf.currentTerm {
+			return
+		}
+
 		rf.checkTerm(peer, response.Term)
+
 		if rf.role != Leader {
 			rf.DPrintf("now is not leader")
 			return
 		}
+
 		if response.Success {
 			if request.Entries == nil || len(request.Entries) == 0 {
 				return
@@ -547,21 +613,29 @@ func (rf *Raft) replicate(peer int, syncCommit bool) {
 			lastEntryIndex := request.Entries[len(request.Entries)-1].CommandIndex
 			if lastEntryIndex > rf.matchIndex[peer] {
 				rf.matchIndex[peer] = lastEntryIndex
+				rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+				rf.DPrintf("peer %d's matchIndex is %d", peer, rf.matchIndex[peer])
 			}
-			rf.nextIndex[peer] = rf.matchIndex[peer] + 1
-			rf.DPrintf("peer %d's matchIndex is %d", peer, rf.matchIndex[peer])
 		} else {
 			// 检查冲突日志
 			if len(rf.log) > response.ConflictIndex && rf.log[response.ConflictIndex].Term == response.ConflictTerm {
 				// 如果日志匹配的话，下次就从这条日志发起
-				rf.nextIndex[peer] = response.ConflictIndex
+				if response.ConflictIndex < rf.nextIndex[peer] {
+					rf.nextIndex[peer] = response.ConflictIndex
+				}
 			} else {
 				// 如果冲突，则从冲突日志的上一条发起
-				rf.nextIndex[peer] = response.ConflictIndex - 1
+				if response.ConflictIndex-1 < rf.nextIndex[peer] {
+					rf.nextIndex[peer] = response.ConflictIndex - 1
+				}
 			}
 			// 索引至少从 1 开始
 			if rf.nextIndex[peer] < 1 {
 				rf.nextIndex[peer] = 1
+			}
+			// 有冲突要立马再次发送日志去快速同步
+             if rf.nextIndex[peer] != oldNextIndex {
+				go rf.replicate(peer, false)
 			}
 
 			rf.DPrintf("peer %d's nextIndex is %d", peer, rf.nextIndex[peer])
@@ -576,7 +650,7 @@ func (rf *Raft) replicate(peer int, syncCommit bool) {
 
 -   日志的新旧不仅要在选举时判断，在这里也要判断，否则可能错误追加条目
 -   只有正确接收条目时才重置选举定时器，这里也是和前面讲的对应，只有你认可对方的时候你才重置定时器，否则你一定要让定时器继续跑让自己可以进入竞选状态
--   不要重复处理追加日志
+-   不要重复处理追加日志，只追加自己本地不存在的条目
 
 另外对于冲突的检查基本就是按论文的建议，一次跳一个任期。
 
@@ -624,6 +698,10 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 					}
 				}
 			}
+		} else if request.PrevLogIndex == 0 && len(rf.log) > 1 {
+			// Leader 没有日志的情况特殊处理一下
+			rf.DPrintf("leader has no log")
+			rf.log = rf.log[:1]
 		}
 
 		// 如果 leaderCommit 大于 commitIndex，设置本地 commitIndex 为 leaderCommit 和最新日志索引中较小的一个。
@@ -641,11 +719,13 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 
 		response.Success = true
 		rf.role = Follower
-		rf.electionTimer.Reset(rf.ElectionTimeout())
+		rf.ResetElectionTimeout()
 	} else {
 		rf.DPrintf("====== log mismatch ======")
 		// 如果自己不存在索引、任期和 prevLogIndex、 prevLogItem 匹配的日志返回 false。
 		response.Success = false
+		// 即使日志冲突但是这里仍然是认可 Leader 的，所以也要重置竞选超时
+		rf.ResetElectionTimeout()
 		// 如果存在一条日志索引和 prevLogIndex 相等，但是任期和 prevLogItem 不相同的日志，需要删除这条日志及所有后继日志。
 		if len(rf.log) > request.PrevLogIndex && rf.log[request.PrevLogIndex].Term != request.Term {
 			rf.DPrintf("====== delete log from %d ======", request.PrevLogIndex)
@@ -704,7 +784,7 @@ func (rf *Raft) getFirstLog(term int) (ConflictIndex int) {
 }
 ```
 
-持久化的实现没什么可讲的，当 currentTerm，votedFor，log 三个变量变化的时候持久化就行了。
+持久化的实现没什么可讲的，当 currentTerm，votedFor，log 三个变量变化的时候持久化就行了。ReadPersist 中解析变量的顺序需要和 persist 中持久化变量的顺序相同。
 
 ```go
 func (rf *Raft) persist() {
@@ -753,7 +833,7 @@ func (rf *Raft) readPersist(data []byte) {
 
 ## 调试测试
 
-对于本次实验，建议多打印日志，我也是在 2A 的基础上把锁接口封装了一下，方便你发现死锁。
+对于本次实验，建议多打印日志，我也是在 2A 的基础上把锁接口封装了一下，方便发现死锁。
 
 ```go
 func (rf *Raft) Lock(owner string) {
@@ -784,67 +864,99 @@ func (rf *Raft) printLog() {
 
 2B 里的 TestBackup2B 和 2C 里的 TestFigure8Unreliable2C 比较难通过一点，你可以单独测试调试。
 
-这里如果你按照论文图 2 里来写就不会有什么问题，有 BUG 就仔细检查图 2 是否提到的点都实现了。我个人犯的几个错误以及一点经验可以供大家参考：
-
--   首先就是一定要仔细看论文图 2！！
--   有些共享变量在使用时虽然加了锁不会冲突，但是在逻辑上使用错误了，也就是两次加锁之间它可能变化了导致你程序发生了意料之外的处理
--   定时器不要随便重置，否则选主就变得玄学了
--   要注意性能，比如 apply 我之前偷懒放在了心跳里，结果应用不及时导致测试不通过，也不是说实现错了，但是尽可能精益求精，毕竟在学校里你是做实验，工作了你就是真的做工程了，总会走到这一步的
-
-说的比较混乱，因为纯粹当作个人笔记来写了……
+这里如果你按照论文图 2 里来写就不会有什么问题，有 BUG 就仔细检查图 2 是否提到的点都实现了。另外我推荐写一个并发测试的脚本，因为测试运行得不是很快，你想测试几百遍要很长时间，我是简单粗暴的把代码复制到了 100 个文件夹，然后一起测试把结果输出到文件再检查是否通过。有时候测试了七八百遍才触发一次问题，所以我建议至少测 1000 遍没有问题才算通过吧。
 
 ```bash
 [root@localhost raft]# go test -run 2A
 Test (2A): initial election ...
-  ... Passed --   4.0  3   60   17426    0
+  ... Passed --   4.0  3   62   18140    0
 Test (2A): election after network failure ...
-  ... Passed --   6.9  3  146   32160    0
+  ... Passed --   6.3  3  130   28754    0
 Test (2A): multiple elections ...
-  ... Passed --   7.1  7  552  124000    0
+  ... Passed --   7.0  7  678  148956    0
 PASS
-ok  	6.824/raft	18.025s
+ok  	6.824/raft	17.293s
 
 [root@localhost raft]# go test -run 2B
 Test (2B): basic agreement ...
-  ... Passed --   1.9  3   16    4644    3
+  ... Passed --   1.7  3   16    4644    3
 Test (2B): RPC byte count ...
   ... Passed --   3.3  3   50  115362   11
 Test (2B): agreement after follower reconnects ...
-  ... Passed --   6.8  3  104   29481    8
+  ... Passed --   6.9  3  103   29184    8
 Test (2B): no agreement if too many followers disconnect ...
-  ... Passed --   4.3  5  160   40390    3
+  ... Passed --   4.3  5  158   39560    3
 Test (2B): concurrent Start()s ...
-  ... Passed --   1.8  3   18    5242    6
+  ... Passed --   1.7  3   18    5242    6
 Test (2B): rejoin of partitioned leader ...
-  ... Passed --   6.2  3  150   36914    4
+  ... Passed --   6.1  3  154   37980    4
 Test (2B): leader backs up quickly over incorrect follower logs ...
-  ... Passed --  25.9  5 1993 1803432  102
+  ... Passed --  26.0  5 1951 1791487  102
 Test (2B): RPC counts aren't too high ...
-  ... Passed --   3.1  3   46   13950   12
+  ... Passed --   2.7  3   37   11414   12
 PASS
-ok  	6.824/raft	53.388s
+ok  	6.824/raft	52.862s
 
 [root@localhost raft]# go test -run 2C
 Test (2C): basic persistence ...
-  ... Passed --   7.4  3  100   25879    6
+  ... Passed --   7.6  3  103   27349    6
 Test (2C): more persistence ...
-  ... Passed --  22.2  5 1016  243362   16
+  ... Passed --  22.1  5 1006  238979   16
 Test (2C): partitioned leader and one follower crash, leader restarts ...
-  ... Passed --   3.6  3   42   11166    4
+  ... Passed --   3.4  3   37    9967    4
 Test (2C): Figure 8 ...
-  ... Passed --  30.9  5  464  107073   15
+  ... Passed --  36.4  5  575  135190   16
 Test (2C): unreliable agreement ...
-  ... Passed --  10.9  5  408  143020  246
+  ... Passed --  10.8  5  404  137625  246
 Test (2C): Figure 8 (unreliable) ...
-  ... Passed --  29.5  5 2184 6895496  582
+  ... Passed --  38.4  5 3279 7043612  313
 Test (2C): churn ...
-  ... Passed --  16.4  5  592  376993  142
+  ... Passed --  16.3  5 1004  803444  122
 Test (2C): unreliable churn ...
-  ... Passed --  16.5  5  556  293710  133
+  ... Passed --  16.3  5  543  311501  139
 PASS
-ok  	6.824/raft	137.400s
+ok  	6.824/raft	151.864s
+
 ```
 
-虽然我截图测试通过了，但实际上在 500 次测试中，会有 FAIL 出现，这是因为测试脚本的原因，我如果在成为 Laeder 后提交 no-op 日志会测试不通过，没有这条日志的话就会有 liveness 的问题，也就是数据虽然同步了，但是就是没法提交，客户端来读我没有办法告诉它未提交条目的数据，目前我也没找到好的办法来规避这个问题，也许这是测试的一个 BUG……
+
+
+
+
+## Figure 8 解读
+
+在做这个实验时，我最开始实现是只要日志复制到了一半以上的实例上，我就提交了（怪我论文看得不仔细……），后来看论文，发现 Leader 只能提交当前任期的日志，这里我们就来说一说为什么 Leader 不能提交之前任期的日志，只能通过提交自己任期的日志，从而间接提交之前任期的日志。
+
+![](Lab02-Raft-Part2B-C/image-20220526162255429.png)
+
+先按**错误的情况**，也就是 Leader 可以提交之前任期的日志。那么上述的流程：
+
+(a) S1 是任期 2 的 Leader (仔细看，有个黑框)，日志已经复制到了 S2。
+
+(b) S1 宕机，S5 获得 S3、S4 和 S5 的选票成为 Leader，然后写了一条日志 index=2 & term=3。
+
+(c) S5 刚写完就宕机了，S1 重新当选 Leader，currentTerm = 4，此刻还没有新的请求进来，S1 将 index=2 & term = 2 的日志复制到了 S3，多数派达成，S1 提交了这个日志（注意，**term=2 不是当前任期的日志，我们在讨论错误的情况**）。然后请求进来，刚写了本地 index=3 & term=4 的日志，S1 就故障了。
+
+(d) 这时候 S5 可以通过来自 S2、S3、S4 和自己的投票，重新成为 Leader，并将 index=2 && term=3 的日志复制到其他所有节点并提交，此时 **index=2 的日志提交了两次！**一次 term=2，一次term=3，这是绝对不允许发生的，已经提交的日志不能够被覆盖！
+
+(e) 这里的情况是，S1 在宕机之前将自己 term=4 的日志复制到了大多数机器上，这样 S5 就不可能选举成功。这是 S1 不发生故障，正确复制的情况。
+
+所以，我们要增加提交的约束，不让 (d) 这种情况发生。这个约束就是，**Leader 只能提交自己任期的日志**。
+
+我们再来看看，加了约束后会变成什么样？前面 (a) 和 (b) 没有任何改变，我们从 (c) 开始。
+
+(c) 还是将 index=2 & term=2 复制到大多数，由于 currentTerm = 4，所以不能提交这条日志。如果 S1 将 term = 4 的日志复制到多数，那么 Leader 就可以提交日志，index=2 & term=2 也会间接一起提交，其实这就是 (e) 的情况，1-2-4 都被提交。
+
+(d) 的情况我觉得是理解问题的关键。如果 S1 只将 term=4 写入自己的日志，然后宕机了；S5 选举成功成为 Leader，然后将 index=2 & term=3 的日志复制到所有节点，*现在 index=2 是没有提交过的，S5 能提交 index=2 & term=3 的日志吗？*
+
+答案是不能。因为 S5 在 S1(term=4) 选举出来后 currentTerm 至少是 5，也可能是 6、7、8……我们假设就是 5，但这条日志 term = 3，Leader 不能提交之前任期的日志，所以这条日志是不能提交的。只有等到新的请求进来，超过半数节点复制了 1-3-5 后，term=3 的日志才能跟着 term=5 的一起提交。
+
+虽然加了这个约束不会重复提交了，但如果一直没新的请求进来，index=2 & term=3 岂不是就一直不能提交？那这里不就阻塞了吗？如果这里是 kv 数据库，问题就很明显了。假设 (c) 或 (d) 中 index=2 那条日志里的 Command 是 `Set("k", "1")`，S5 当选 Leader 后，客户端来查询 `Get("k")`，Leader 查到日志有记录但又不能回复 1 给客户端（因为按照约束这条日志未提交），线性一致性要求不能返回陈旧的数据，Leader 迫切地需要知道这条日志到底能不能提交。
+
+所以 raft 论文提到了引入 no-op 日志来解决这个问题。这个在 etcd 中有实现。no-op 日志即只有 index 和 term 信息，command 信息为空。也是要写到磁盘存储的。
+
+具体流程是在 Leader 刚选举成功的时候，立即追加一条 no-op 日志，并立即复制到其它节点，no-op 日志一经提交，Leader 前面那些未提交的日志全部间接提交，问题就解决了。像上面的 kv 数据库，有了 no-op 日志之后，Leader 就能快速响应客户端查询了。
+
+本质上，no-op 日志使 Leader 隐式地快速提交之前任期未提交的日志，确认当前 commitIndex，这样系统才会快速对外正常工作。
 
 ​	

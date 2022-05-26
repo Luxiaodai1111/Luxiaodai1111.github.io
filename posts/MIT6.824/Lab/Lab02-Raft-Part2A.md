@@ -422,7 +422,7 @@ func (rf *Raft) GetState() (int, bool) {
 }
 ```
 
-对于调试尽可能多打日志，因为这个实验做的还比较顺利，所以也没打印什么日志。你可以对框架提供的 DPrintf 进行一些修改，这样就不用每次都传一堆重复的参数了。
+对于调试尽可能多打日志，因为 2A 实验做的还比较顺利，所以也没打印什么日志。你可以对框架提供的 DPrintf 进行一些修改，这样就不用每次都传一堆重复的参数了。
 
 ```go
 func (rf *Raft) DPrintf(format string, a ...interface{}) {

@@ -153,6 +153,10 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 					}
 				}
 			}
+		} else if request.PrevLogIndex == 0 && len(rf.log) > 1 {
+			// Leader 没有日志的情况特殊处理一下
+			rf.DPrintf("leader has no log")
+			rf.log = rf.log[:1]
 		}
 
 		// 如果 leaderCommit 大于 commitIndex，设置本地 commitIndex 为 leaderCommit 和最新日志索引中较小的一个。
@@ -170,13 +174,13 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 
 		response.Success = true
 		rf.role = Follower
-		rf.electionTimer.Reset(rf.ElectionTimeout())
+		rf.ResetElectionTimeout()
 	} else {
 		rf.DPrintf("====== log mismatch ======")
 		// 如果自己不存在索引、任期和 prevLogIndex、 prevLogItem 匹配的日志返回 false。
 		response.Success = false
 		// 即使日志冲突但是这里仍然是认可 Leader 的，所以也要重置竞选超时
-		rf.electionTimer.Reset(rf.ElectionTimeout())
+		rf.ResetElectionTimeout()
 		// 如果存在一条日志索引和 prevLogIndex 相等，但是任期和 prevLogItem 不相同的日志，需要删除这条日志及所有后继日志。
 		if len(rf.log) > request.PrevLogIndex && rf.log[request.PrevLogIndex].Term != request.Term {
 			rf.DPrintf("====== delete log from %d ======", request.PrevLogIndex)
@@ -284,20 +288,27 @@ func (rf *Raft) replicate(peer int, syncCommit bool) {
 				rf.DPrintf("peer %d's matchIndex is %d", peer, rf.matchIndex[peer])
 			}
 		} else {
+			oldNextIndex := rf.nextIndex[peer]
 			// 检查冲突日志
 			if len(rf.log) > response.ConflictIndex && rf.log[response.ConflictIndex].Term == response.ConflictTerm {
 				// 如果日志匹配的话，下次就从这条日志发起
-				rf.nextIndex[peer] = response.ConflictIndex
+				if response.ConflictIndex < rf.nextIndex[peer] {
+					rf.nextIndex[peer] = response.ConflictIndex
+				}
 			} else {
 				// 如果冲突，则从冲突日志的上一条发起
-				rf.nextIndex[peer] = response.ConflictIndex - 1
+				if response.ConflictIndex-1 < rf.nextIndex[peer] {
+					rf.nextIndex[peer] = response.ConflictIndex - 1
+				}
 			}
 			// 索引至少从 1 开始
 			if rf.nextIndex[peer] < 1 {
 				rf.nextIndex[peer] = 1
 			}
 			// 有冲突要立马再次发送日志去快速同步
-			go rf.replicate(peer, false)
+			if rf.nextIndex[peer] != oldNextIndex {
+				go rf.replicate(peer, false)
+			}
 
 			rf.DPrintf("peer %d's nextIndex is %d", peer, rf.nextIndex[peer])
 		}
@@ -352,6 +363,20 @@ func (rf *Raft) HeartbeatTimeout() time.Duration {
 func (rf *Raft) ElectionTimeout() time.Duration {
 	rand.Seed(time.Now().Unix() + int64(rf.me))
 	return time.Millisecond * time.Duration(1000+rand.Int63n(500))
+}
+
+// 如果明确 timer 已经expired，并且 t.C 已经被取空，那么可以直接使用 Reset；
+// 如果程序之前没有从 t.C 中读取过值，这时需要首先调用 Stop()，
+// 如果返回 true，说明 timer 还没有 expire，stop 成功删除 timer，可直接 reset；
+// 如果返回 false，说明 stop 前已经 expire，需要显式 drain channel。
+func (rf *Raft) ResetElectionTimeout() {
+	if !rf.electionTimer.Stop() {
+		select {
+		case <-rf.electionTimer.C:
+		default:
+		}
+	}
+	rf.electionTimer.Reset(rf.ElectionTimeout())
 }
 
 // return currentTerm and whether this server
@@ -467,7 +492,7 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply
 	// 投票，重复回复也没事，TCP 会帮你处理掉的
 	rf.DPrintf("vote for %d", request.CandidateId)
 	// 既然要投票给别人，那自己肯定就不竞选了
-	rf.electionTimer.Reset(rf.ElectionTimeout())
+	rf.ResetElectionTimeout()
 	rf.role = Follower
 	rf.votedFor = request.CandidateId
 	rf.persist()
@@ -528,7 +553,7 @@ func (rf *Raft) startElection() {
 						// 竞选成功
 						rf.DPrintf("====== candidate success ======")
 						rf.role = Leader
-						rf.electionTimer.Reset(rf.ElectionTimeout())
+						rf.ResetElectionTimeout()
 						// 每次选举后重新初始化
 						for i := 0; i < len(rf.peers); i++ {
 							rf.nextIndex[i] = len(rf.log)
@@ -693,7 +718,7 @@ func (rf *Raft) ticker() {
 			rf.votedFor = -1
 			rf.persist()
 			rf.startElection()
-			rf.electionTimer.Reset(rf.ElectionTimeout())
+			rf.ResetElectionTimeout()
 			rf.Unlock("electionTimer")
 		case <-rf.heartbeatTimer.C:
 			rf.Lock("heartbeatTimer")
@@ -702,7 +727,7 @@ func (rf *Raft) ticker() {
 				rf.commitLog()
 				// Leader 定期发送心跳
 				rf.broadcast(false)
-				rf.electionTimer.Reset(rf.ElectionTimeout())
+				rf.ResetElectionTimeout()
 			}
 			rf.heartbeatTimer.Reset(rf.HeartbeatTimeout())
 			rf.Unlock("heartbeatTimer")
