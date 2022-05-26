@@ -793,8 +793,6 @@ func (rf *Raft) printLog() {
 
 说的比较混乱，因为纯粹当作个人笔记来写了……
 
-这个实验也是连带着 2A 又测试了 500 遍，暂时没发现什么问题。
-
 ```bash
 [root@localhost raft]# go test -run 2A
 Test (2A): initial election ...
@@ -846,5 +844,7 @@ Test (2C): unreliable churn ...
 PASS
 ok  	6.824/raft	137.400s
 ```
+
+虽然我截图测试通过了，但实际上在 500 次测试中，会有 FAIL 出现，这是因为测试脚本的原因，我如果在成为 Laeder 后提交 no-op 日志会测试不通过，没有这条日志的话就会有 liveness 的问题，也就是数据虽然同步了，但是就是没法提交，客户端来读我没有办法告诉它未提交条目的数据，目前我也没找到好的办法来规避这个问题，也许这是测试的一个 BUG……
 
 ​	
