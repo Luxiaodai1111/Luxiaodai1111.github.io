@@ -371,6 +371,7 @@ func (rf *Raft) ElectionTimeout() time.Duration {
 // 如果返回 false，说明 stop 前已经 expire，需要显式 drain channel。
 func (rf *Raft) ResetElectionTimeout() {
 	if !rf.electionTimer.Stop() {
+		// 利用一个 select 来包裹 channel drain，这样无论 channel 中是否有数据，drain 都不会阻塞住
 		select {
 		case <-rf.electionTimer.C:
 		default:
