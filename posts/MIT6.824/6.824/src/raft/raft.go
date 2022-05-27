@@ -455,6 +455,7 @@ func (rf *Raft) readPersist(data []byte) {
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
 	// Your code here (2D).
+	rf.DPrintf("CondInstallSnapshot")
 
 	return true
 }
@@ -465,6 +466,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	rf.DPrintf("Snapshot %d", index)
 
 	rf.Lock("Snapshot")
 	defer rf.Unlock("Snapshot")
