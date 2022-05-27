@@ -349,6 +349,7 @@ type Raft struct {
 	nextIndex  []int // 对于每一台服务器，下条发送到该机器的日志索引
 	matchIndex []int // 对于每一台服务器，已经复制到该服务器的最高日志条目的索引
 
+	electionTime   time.Time   // go timer reset bugfix
 	electionTimer  *time.Timer // 选举计时器
 	heartbeatTimer *time.Timer // 心跳计时器
 
@@ -378,6 +379,7 @@ func (rf *Raft) ResetElectionTimeout() {
 		}
 	}
 	rf.electionTimer.Reset(rf.ElectionTimeout())
+	rf.electionTime = time.Now()
 }
 
 // return currentTerm and whether this server
@@ -464,6 +466,22 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 
+	rf.Lock("Snapshot")
+	defer rf.Unlock("Snapshot")
+
+	// 避免切片内存泄露
+	rf.log = append([]LogEntry{}, rf.log[index:]...)
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if e.Encode(rf.currentTerm) != nil ||
+		e.Encode(rf.votedFor) != nil ||
+		e.Encode(rf.log) != nil {
+		rf.DPrintf("------ persist encode error ------")
+	}
+	state := w.Bytes()
+
+	rf.persister.SaveStateAndSnapshot(state, snapshot)
 }
 
 //
@@ -713,6 +731,17 @@ func (rf *Raft) ticker() {
 		select {
 		case <-rf.electionTimer.C:
 			rf.Lock("electionTimer")
+			if rf.electionTime.Add(rf.HeartbeatTimeout()).After(time.Now()) {
+				// go timer reset 的 bug：
+				// 如果 sendTime 的执行发生在 drain channel 执行后，那么问题就来了，
+				// 虽然 Stop 返回 false（因为 timer 已经 expire），但 drain channel 并没有读出任何数据。
+				// 之后，sendTime 将数据发到 channel 中。timer Reset 后的 Timer 中的 Channel 实际上已经有了数据
+				// 所以我增加了 electionTime 字段，如果与重置时间距离过短，那么就重置这个超时
+				rf.DPrintf("go timer reset bugfix")
+				rf.ResetElectionTimeout()
+				rf.Unlock("electionTimer")
+				continue
+			}
 			// 开始竞选，任期加一
 			rf.role = Candidate
 			rf.currentTerm += 1

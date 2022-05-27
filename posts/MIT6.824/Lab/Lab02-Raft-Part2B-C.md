@@ -108,7 +108,9 @@ $ for i in {0..10}; do go test; done
 
 对于 2B 来说，实现都在论文图 2 里提到了，如果有 BUG，请回头仔细看图 2 里的描述你是否真的都实现了。如果 2B 实现正确了，2C 其实就很简单了，只要在 currentTerm，voteFor 和 logs 变化时持久化就可以了，实验没有要求要写磁盘，而是提供了 Persister，示例也写好了，所以简化了很多。2C 之所以被标记为 hard 大概是因为它的测试条件更苛刻了吧，如果 2B 实现得不对，在这里就会爆出之前没有测出的问题。
 
-好了，这次实验和 2A 相比功能就完善很多，所以我们把结构体成员补上，相比论文，这里只多加了一个 plug 结构体，这是为了性能考虑，当应用发起请求时，如果每条请求我们都发送一条 RPC 那么效率就太低了，所以我们增加了一个阈值，如果单位时间内请求小于阈值，那么就等心跳去发送日志，如果流量过大，则立马发送日志，这也是 2B 测试里的一项。
+好了，这次实验和 2A 相比功能就完善很多，所以我们把结构体成员补上，相比论文，这里加了一个 plug 结构体，这是为了性能考虑，当应用发起请求时，如果每条请求我们都发送一条 RPC 那么效率就太低了，所以我们增加了一个阈值，如果单位时间内请求小于阈值，那么就等心跳去发送日志，如果流量过大，则立马发送日志，这也是 2B 测试里的一项。
+
+electionTime 字段也是论文没有的，这是为了屏蔽 go timer 的 bug 用的，在选举的时候再说是什么问题。
 
 ```go
 type LogEntry struct {
@@ -135,6 +137,7 @@ type Raft struct {
 	nextIndex  []int // 对于每一台服务器，下条发送到该机器的日志索引
 	matchIndex []int // 对于每一台服务器，已经复制到该服务器的最高日志条目的索引
 
+	electionTime   time.Time   // go timer reset bugfix
 	electionTimer  *time.Timer // 选举计时器
 	heartbeatTimer *time.Timer // 心跳计时器
 
@@ -228,6 +231,17 @@ func (rf *Raft) ticker() {
 		select {
 		case <-rf.electionTimer.C:
 			rf.Lock("electionTimer")
+			if rf.electionTime.Add(rf.HeartbeatTimeout()).After(time.Now()) {
+				// go timer reset 的 bug：
+				// 如果 sendTime 的执行发生在 drain channel 执行后，那么问题就来了，
+				// 虽然 Stop 返回 false（因为 timer 已经 expire），但 drain channel 并没有读出任何数据。
+				// 之后，sendTime 将数据发到 channel 中。timer Reset 后的 Timer 中的 Channel 实际上已经有了数据
+				// 所以我增加了 electionTime 字段，如果与重置时间距离过短，那么就重置这个超时
+				rf.DPrintf("go timer reset bugfix")
+				rf.ResetElectionTimeout()
+				rf.Unlock("electionTimer")
+				continue
+			}
 			// 开始竞选，任期加一
 			rf.role = Candidate
 			rf.currentTerm += 1
@@ -517,7 +531,7 @@ func (rf *Raft) checkTerm(peer int, term int) {
 2.  竞选成功后，且定期重置
 3.  认可别人的日志条目时（包括冲突）
 
-另外 Timer 确实很多坑……
+另外 Timer 确实很多坑，首先是 Reset 的用法，这里可以参考[论golang Timer Reset方法使用的正确姿势](https://tonybai.com/2016/12/21/how-to-use-timer-reset-in-golang-correctly/)，包括 bug 在文章里也提及了。
 
 ```go
 // 如果明确 timer 已经expired，并且 t.C 已经被取空，那么可以直接使用 Reset；
@@ -525,18 +539,33 @@ func (rf *Raft) checkTerm(peer int, term int) {
 // 如果返回 true，说明 timer 还没有 expire，stop 成功删除 timer，可直接 reset；
 // 如果返回 false，说明 stop 前已经 expire，需要显式 drain channel。
 func (rf *Raft) ResetElectionTimeout() {
-   if !rf.electionTimer.Stop() {
-      // 利用一个 select 来包裹 channel drain，这样无论 channel 中是否有数据，drain 都不会阻塞住
-      select {
-      case <-rf.electionTimer.C:
-      default:
-      }
-   }
-   rf.electionTimer.Reset(rf.ElectionTimeout())
+	if !rf.electionTimer.Stop() {
+		// 利用一个 select 来包裹 channel drain，这样无论 channel 中是否有数据，drain 都不会阻塞住
+		select {
+		case <-rf.electionTimer.C:
+		default:
+		}
+	}
+	rf.electionTimer.Reset(rf.ElectionTimeout())
+	rf.electionTime = time.Now()
 }
 ```
 
+在 ticker 协程里选举超时时，额外判断间距上次重置的时间是否过短，如果过短那就是 bug 触发了。我用的 go 版本是 1.17.9。这个可能几百上千遍才会偶然触发一次，所以实际为了通过这个实验，我测试了 5000 遍才算过。
 
+```go
+if rf.electionTime.Add(rf.HeartbeatTimeout()).After(time.Now()) {
+    // go timer reset 的 bug：
+    // 如果 sendTime 的执行发生在 drain channel 执行后，那么问题就来了，
+    // 虽然 Stop 返回 false（因为 timer 已经 expire），但 drain channel 并没有读出任何数据。
+    // 之后，sendTime 将数据发到 channel 中。timer Reset 后的 Timer 中的 Channel 实际上已经有了数据
+    // 所以我增加了 electionTime 字段，如果与重置时间距离过短，那么就重置这个超时
+    rf.DPrintf("go timer reset bugfix")
+    rf.ResetElectionTimeout()
+    rf.Unlock("electionTimer")
+    continue
+}
+```
 
 
 
