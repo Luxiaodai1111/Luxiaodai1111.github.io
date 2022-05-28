@@ -20,7 +20,7 @@ index 参数表示在快照中反映的最高日志条目。Raft 应该丢弃在
 
 当服务器重新启动时，应用层会读取持久化的快照并恢复其保存的状态。
 
-在此以前，本实验建议你实现一个叫做 CondInstallSnapshot 的函数，以避免发送给 applyCh 的快照和日志条目被 coordinated。这个残存的 API 接口仍然存在，但我们不鼓励你去实现它：相反，我们建议你只需让它返回 true。
+以前本实验会建议你实现一个叫做 CondInstallSnapshot 的函数，以避免发送给 applyCh 的快照和日志条目被 coordinated。这个残存的 API 接口仍然存在，但我们不鼓励你去实现它：相反，我们建议你只需让它返回 true。
 
 任务：实现 Snapshot() 和 InstallSnapshot RPC，以及对 Raft 修改以支持这些功能（例如，用修剪后的日志进行操作）。当你的解决方案通过 2D 测试（以及之前所有的 Lab 2 测试）时，就完成了。
 

@@ -231,7 +231,7 @@ func (rf *Raft) ticker() {
 		select {
 		case <-rf.electionTimer.C:
 			rf.Lock("electionTimer")
-			if rf.electionTime.Add(rf.HeartbeatTimeout()).After(time.Now()) {
+			if rf.electionTime.Add(time.Millisecond * ElectionTimeoutBase).After(time.Now()) {
 				// go timer reset 的 bug：
 				// 如果 sendTime 的执行发生在 drain channel 执行后，那么问题就来了，
 				// 虽然 Stop 返回 false（因为 timer 已经 expire），但 drain channel 并没有读出任何数据。
@@ -242,24 +242,24 @@ func (rf *Raft) ticker() {
 				rf.Unlock("electionTimer")
 				continue
 			}
+			rf.ResetElectionTimeout()
 			// 开始竞选，任期加一
 			rf.role = Candidate
 			rf.currentTerm += 1
 			rf.votedFor = -1
 			rf.persist()
 			rf.startElection()
-			rf.ResetElectionTimeout()
 			rf.Unlock("electionTimer")
 		case <-rf.heartbeatTimer.C:
 			rf.Lock("heartbeatTimer")
+			rf.ResetHeartbeatTimeout()
 			if rf.role == Leader {
+				rf.ResetElectionTimeout()
 				// 更新提交索引
 				rf.commitLog()
 				// Leader 定期发送心跳
 				rf.broadcast(false)
-				rf.ResetElectionTimeout()
 			}
-			rf.heartbeatTimer.Reset(rf.HeartbeatTimeout())
 			rf.Unlock("heartbeatTimer")
 		}
 	}
@@ -534,11 +534,35 @@ func (rf *Raft) checkTerm(peer int, term int) {
 另外 Timer 确实很多坑，首先是 Reset 的用法，这里可以参考[论golang Timer Reset方法使用的正确姿势](https://tonybai.com/2016/12/21/how-to-use-timer-reset-in-golang-correctly/)，包括 bug 在文章里也提及了。
 
 ```go
+const HeartbeatTimeoutBase = 100
+
+func (rf *Raft) HeartbeatTimeout() time.Duration {
+	return time.Millisecond * HeartbeatTimeoutBase
+}
+
+func (rf *Raft) ResetHeartbeatTimeout() {
+	if !rf.heartbeatTimer.Stop() {
+		select {
+		case <-rf.heartbeatTimer.C:
+		default:
+		}
+	}
+	rf.heartbeatTimer.Reset(rf.HeartbeatTimeout())
+}
+
+const ElectionTimeoutBase = 1000
+
+func (rf *Raft) ElectionTimeout() time.Duration {
+	rand.Seed(time.Now().Unix() + int64(rf.me))
+	return time.Millisecond * time.Duration(ElectionTimeoutBase+rand.Int63n(ElectionTimeoutBase/2))
+}
+
 // 如果明确 timer 已经expired，并且 t.C 已经被取空，那么可以直接使用 Reset；
 // 如果程序之前没有从 t.C 中读取过值，这时需要首先调用 Stop()，
 // 如果返回 true，说明 timer 还没有 expire，stop 成功删除 timer，可直接 reset；
 // 如果返回 false，说明 stop 前已经 expire，需要显式 drain channel。
 func (rf *Raft) ResetElectionTimeout() {
+	rf.electionTime = time.Now()
 	if !rf.electionTimer.Stop() {
 		// 利用一个 select 来包裹 channel drain，这样无论 channel 中是否有数据，drain 都不会阻塞住
 		select {
@@ -547,7 +571,6 @@ func (rf *Raft) ResetElectionTimeout() {
 		}
 	}
 	rf.electionTimer.Reset(rf.ElectionTimeout())
-	rf.electionTime = time.Now()
 }
 ```
 
@@ -646,24 +669,26 @@ func (rf *Raft) replicate(peer int, syncCommit bool) {
 				rf.DPrintf("peer %d's matchIndex is %d", peer, rf.matchIndex[peer])
 			}
 		} else {
+			var nextIndex int
+			oldNextIndex := rf.nextIndex[peer]
 			// 检查冲突日志
 			if len(rf.log) > response.ConflictIndex && rf.log[response.ConflictIndex].Term == response.ConflictTerm {
 				// 如果日志匹配的话，下次就从这条日志发起
-				if response.ConflictIndex < rf.nextIndex[peer] {
-					rf.nextIndex[peer] = response.ConflictIndex
-				}
+				nextIndex = response.ConflictIndex
 			} else {
 				// 如果冲突，则从冲突日志的上一条发起
-				if response.ConflictIndex-1 < rf.nextIndex[peer] {
-					rf.nextIndex[peer] = response.ConflictIndex - 1
-				}
+				nextIndex = response.ConflictIndex - 1
 			}
-			// 索引至少从 1 开始
-			if rf.nextIndex[peer] < 1 {
-				rf.nextIndex[peer] = 1
+			// 冲突索引只能往回退
+			if nextIndex < rf.nextIndex[peer] {
+				rf.nextIndex[peer] = nextIndex
+			}
+			// 索引要大于 matchIndex
+			if rf.matchIndex[peer] >= nextIndex {
+				rf.nextIndex[peer] = rf.matchIndex[peer] + 1
 			}
 			// 有冲突要立马再次发送日志去快速同步
-             if rf.nextIndex[peer] != oldNextIndex {
+			if rf.nextIndex[peer] < oldNextIndex {
 				go rf.replicate(peer, false)
 			}
 
@@ -727,10 +752,6 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 					}
 				}
 			}
-		} else if request.PrevLogIndex == 0 && len(rf.log) > 1 {
-			// Leader 没有日志的情况特殊处理一下
-			rf.DPrintf("leader has no log")
-			rf.log = rf.log[:1]
 		}
 
 		// 如果 leaderCommit 大于 commitIndex，设置本地 commitIndex 为 leaderCommit 和最新日志索引中较小的一个。
