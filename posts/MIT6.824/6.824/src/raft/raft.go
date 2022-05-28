@@ -79,6 +79,20 @@ func (rf *Raft) Unlock(owner string) {
 	rf.mu.Unlock()
 }
 
+func (rf *Raft) InstallSnapshot(request *InstallSnapshotArgs, response *InstallSnapshotReply) {
+	// TODO
+}
+
+// 根据绝对索引获取相对索引处的日志
+func (rf *Raft) log(index int) LogEntry {
+	return rf.logs[rf.index(index)]
+}
+
+// 根据绝对索引获取相对索引
+func (rf *Raft) index(index int) int {
+	return index - rf.logs[0].CommandIndex
+}
+
 func (rf *Raft) getLastLog() LogEntry {
 	return rf.logs[len(rf.logs)-1]
 }
@@ -101,13 +115,13 @@ func (rf *Raft) getConflictIndex(term int) (ConflictIndex int) {
 
 	for i := middle; i >= 0; i-- {
 		if rf.logs[i].Term != term {
-			rf.DPrintf("====== getFirstLog in term %d: %d ======", term, i+1)
-			return i + 1
+			rf.DPrintf("====== getFirstLog in term %d: %d ======", term, rf.logs[i].CommandIndex+1)
+			return rf.logs[i].CommandIndex + 1
 		}
 	}
 
-	rf.DPrintf("====== getFirstLog in term %d: %d ======", term, 0)
-	return 0
+	rf.DPrintf("====== getFirstLog in term %d: %d ======", term, rf.logs[0].CommandIndex)
+	return rf.logs[0].CommandIndex
 }
 
 func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntriesReply) {
@@ -128,7 +142,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 
 	// 检查日志
 	rf.DPrintf("PrevLogIndex: %d, PrevLogTerm: %d, LeaderCommit: %d", request.PrevLogIndex, request.PrevLogTerm, request.LeaderCommit)
-	if len(rf.logs) > request.PrevLogIndex && rf.logs[request.PrevLogIndex].Term == request.PrevLogTerm {
+	if len(rf.logs) > request.PrevLogIndex && rf.log(request.PrevLogIndex).Term == request.PrevLogTerm {
 		// 追加日志
 		if len(request.Entries) > 0 {
 			// 本地日志要更新一些，拒绝接收
@@ -145,8 +159,8 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 			if lastEntry.CommandIndex > rf.commitIndex {
 				// 不要重复追加日志
 				for idx, entry := range request.Entries {
-					if lastLog.CommandIndex < entry.CommandIndex || entry.Term != rf.logs[entry.CommandIndex].Term {
-						rf.logs = append(rf.logs[:entry.CommandIndex], request.Entries[idx:]...)
+					if lastLog.CommandIndex < entry.CommandIndex || entry.Term != rf.log(entry.CommandIndex).Term {
+						rf.logs = append(rf.logs[:rf.index(entry.CommandIndex)], request.Entries[idx:]...)
 						rf.persist()
 						rf.DPrintf("====== append log %d-%d ======", entry.CommandIndex, lastEntry.CommandIndex)
 						break
@@ -175,22 +189,22 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 		response.Success = false
 		rf.role = Follower
 		// 如果存在一条日志索引和 prevLogIndex 相等，但是任期和 prevLogItem 不相同的日志，需要删除这条日志及所有后继日志。
-		if len(rf.logs) > request.PrevLogIndex && rf.logs[request.PrevLogIndex].Term != request.Term {
+		if len(rf.logs) > request.PrevLogIndex && rf.log(request.PrevLogIndex).Term != request.Term {
 			rf.DPrintf("====== delete log from %d ======", request.PrevLogIndex)
-			rf.logs = rf.logs[:request.PrevLogIndex]
+			rf.logs = rf.logs[:rf.index(request.PrevLogIndex)]
 			//rf.persist()
 		}
 		// 加速日志冲突检查, 获取不大于 request.PrevLogTerm 且包含日志的冲突条目
 		lastLog := rf.getLastLog()
 		for i := lastLog.CommandIndex; i >= 0; i-- {
-			if rf.logs[i].Term <= request.PrevLogTerm {
-				response.ConflictTerm = rf.logs[i].Term
-				response.ConflictIndex = rf.getConflictIndex(rf.logs[i].Term)
+			if rf.log(i).Term <= request.PrevLogTerm {
+				response.ConflictTerm = rf.log(i).Term
+				response.ConflictIndex = rf.getConflictIndex(response.ConflictTerm)
 				if response.ConflictIndex == request.PrevLogIndex && response.ConflictIndex > 0 {
 					// 获取含有日志的上一个任期
-					prevLog := rf.logs[response.ConflictIndex-1]
+					prevLog := rf.log(response.ConflictIndex - 1)
 					response.ConflictTerm = prevLog.Term
-					response.ConflictIndex = rf.getConflictIndex(prevLog.Term)
+					response.ConflictIndex = rf.getConflictIndex(response.ConflictTerm)
 				}
 				break
 			}
@@ -236,20 +250,20 @@ func (rf *Raft) replicate(peer int, syncCommit bool) {
 		if rf.nextIndex[peer] < len(rf.logs) {
 			// 存在待提交日志
 			rf.DPrintf("peer %d's nextIndex is %d", peer, rf.nextIndex[peer])
-			request.Entries = rf.logs[rf.nextIndex[peer]:]
+			request.Entries = rf.logs[rf.index(rf.nextIndex[peer]):]
 		}
 	}
 
 	// 根据是否携带日志来填充参数
 	if len(request.Entries) > 0 {
-		prevLog := rf.logs[request.Entries[0].CommandIndex-1]
+		prevLog := rf.log(request.Entries[0].CommandIndex - 1)
 		request.PrevLogIndex = prevLog.CommandIndex
 		request.PrevLogTerm = prevLog.Term
 		rf.DPrintf("send log %d-%d to %d",
 			request.Entries[0].CommandIndex, request.Entries[len(request.Entries)-1].CommandIndex, peer)
 	} else {
 		request.PrevLogIndex = rf.nextIndex[peer] - 1
-		request.PrevLogTerm = rf.logs[rf.nextIndex[peer]-1].Term
+		request.PrevLogTerm = rf.log(rf.nextIndex[peer] - 1).Term
 		rf.DPrintf("send heartbeat %+v to %d", request, peer)
 	}
 	rf.Unlock("replicate")
@@ -287,7 +301,7 @@ func (rf *Raft) replicate(peer int, syncCommit bool) {
 			oldNextIndex := rf.nextIndex[peer]
 
 			// 检查冲突日志
-			if len(rf.logs) > response.ConflictIndex && rf.logs[response.ConflictIndex].Term == response.ConflictTerm {
+			if len(rf.logs) > response.ConflictIndex && rf.log(response.ConflictIndex).Term == response.ConflictTerm {
 				// 如果日志匹配的话，下次就从这条日志发起
 				nextIndex = response.ConflictIndex
 			} else {
@@ -363,11 +377,11 @@ func (rf *Raft) HeartbeatTimeout() time.Duration {
 	return time.Millisecond * HeartbeatTimeoutBase
 }
 
-const ElectionTimeoutBase = 1000
+const ElectionTimeoutBase = 500
 
 func (rf *Raft) ElectionTimeout() time.Duration {
 	//rand.Seed(time.Now().Unix() + int64(rf.me))
-	return time.Millisecond * time.Duration(ElectionTimeoutBase+rand.Int63n(ElectionTimeoutBase/2))
+	return time.Millisecond * time.Duration(ElectionTimeoutBase+rand.Int63n(ElectionTimeoutBase))
 }
 
 // 如果明确 timer 已经expired，并且 t.C 已经被取空，那么可以直接使用 Reset；
@@ -718,8 +732,8 @@ func (rf *Raft) apply() {
 			for idx := rf.lastApplied + 1; idx <= rf.commitIndex; idx++ {
 				applyMsgs = append(applyMsgs, ApplyMsg{
 					CommandValid: true,
-					Command:      rf.logs[idx].Command,
-					CommandIndex: rf.logs[idx].CommandIndex,
+					Command:      rf.log(idx).Command,
+					CommandIndex: rf.log(idx).CommandIndex,
 				})
 			}
 			rf.Unlock("apply")
@@ -754,12 +768,12 @@ func (rf *Raft) commitCheck(commitIndex int) bool {
 
 func (rf *Raft) commitLog() {
 	low := rf.commitIndex + 1
-	high := len(rf.logs) - 1
+	high := rf.getLastLog().CommandIndex
 	if low > high {
 		return
 	}
 	// 只能提交当前任期的日志，但由于测试没法提交空日志，所以这里有 liveness 的问题
-	for i := high; i >= low && rf.logs[i].Term == rf.currentTerm; i-- {
+	for i := high; i >= low && rf.log(i).Term == rf.currentTerm; i-- {
 		if rf.commitCheck(i) {
 			rf.commitIndex = i
 			rf.DPrintf("====== commit log %d ======", i)
@@ -774,7 +788,6 @@ func (rf *Raft) commitLog() {
 // heartsbeats recently.
 func (rf *Raft) ticker() {
 	heartbeatTicker := time.NewTicker(rf.HeartbeatTimeout())
-	rf.electionTimer = time.NewTimer(rf.ElectionTimeout())
 	rf.ResetElectionTimeout()
 	for rf.killed() == false {
 		select {
@@ -844,6 +857,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		plug:        0,
 	}
 	rf.logs = append(rf.logs, LogEntry{})
+	rf.electionTimer = time.NewTimer(rf.ElectionTimeout())
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
