@@ -80,19 +80,19 @@ func (rf *Raft) Unlock(owner string) {
 }
 
 func (rf *Raft) getLastLog() LogEntry {
-	return rf.log[len(rf.log)-1]
+	return rf.logs[len(rf.logs)-1]
 }
 
 // 获取 term 任期内的第一条日志，这里保证 term 任期内一定有日志
-func (rf *Raft) getFirstLog(term int) (ConflictIndex int) {
+func (rf *Raft) getConflictIndex(term int) (ConflictIndex int) {
 	low := 0
-	high := len(rf.log)
+	high := len(rf.logs)
 	middle := (low + high) / 2
 	// 二分先找到一条包含该任期的日志
 	for ; low < high; middle = (low + high) / 2 {
-		if rf.log[middle].Term == term {
+		if rf.logs[middle].Term == term {
 			break
-		} else if rf.log[middle].Term < term {
+		} else if rf.logs[middle].Term < term {
 			low = middle + 1
 		} else {
 			high = middle - 1
@@ -100,7 +100,7 @@ func (rf *Raft) getFirstLog(term int) (ConflictIndex int) {
 	}
 
 	for i := middle; i >= 0; i-- {
-		if rf.log[i].Term != term {
+		if rf.logs[i].Term != term {
 			rf.DPrintf("====== getFirstLog in term %d: %d ======", term, i+1)
 			return i + 1
 		}
@@ -128,7 +128,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 
 	// 检查日志
 	rf.DPrintf("PrevLogIndex: %d, PrevLogTerm: %d, LeaderCommit: %d", request.PrevLogIndex, request.PrevLogTerm, request.LeaderCommit)
-	if len(rf.log) > request.PrevLogIndex && rf.log[request.PrevLogIndex].Term == request.PrevLogTerm {
+	if len(rf.logs) > request.PrevLogIndex && rf.logs[request.PrevLogIndex].Term == request.PrevLogTerm {
 		// 追加日志
 		if len(request.Entries) > 0 {
 			// 本地日志要更新一些，拒绝接收
@@ -145,8 +145,8 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 			if lastEntry.CommandIndex > rf.commitIndex {
 				// 不要重复追加日志
 				for idx, entry := range request.Entries {
-					if lastLog.CommandIndex < entry.CommandIndex || entry.Term != rf.log[entry.CommandIndex].Term {
-						rf.log = append(rf.log[:entry.CommandIndex], request.Entries[idx:]...)
+					if lastLog.CommandIndex < entry.CommandIndex || entry.Term != rf.logs[entry.CommandIndex].Term {
+						rf.logs = append(rf.logs[:entry.CommandIndex], request.Entries[idx:]...)
 						rf.persist()
 						rf.DPrintf("====== append log %d-%d ======", entry.CommandIndex, lastEntry.CommandIndex)
 						break
@@ -164,8 +164,6 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 				rf.commitIndex = request.LeaderCommit
 			}
 			rf.DPrintf("update commitIndex %d", rf.commitIndex)
-			// 更新状态机
-			rf.applyCommitLog()
 		}
 
 		response.Success = true
@@ -177,22 +175,22 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 		response.Success = false
 		rf.role = Follower
 		// 如果存在一条日志索引和 prevLogIndex 相等，但是任期和 prevLogItem 不相同的日志，需要删除这条日志及所有后继日志。
-		if len(rf.log) > request.PrevLogIndex && rf.log[request.PrevLogIndex].Term != request.Term {
+		if len(rf.logs) > request.PrevLogIndex && rf.logs[request.PrevLogIndex].Term != request.Term {
 			rf.DPrintf("====== delete log from %d ======", request.PrevLogIndex)
-			rf.log = rf.log[:request.PrevLogIndex]
-			rf.persist()
+			rf.logs = rf.logs[:request.PrevLogIndex]
+			//rf.persist()
 		}
 		// 加速日志冲突检查, 获取不大于 request.PrevLogTerm 且包含日志的冲突条目
 		lastLog := rf.getLastLog()
 		for i := lastLog.CommandIndex; i >= 0; i-- {
-			if rf.log[i].Term <= request.PrevLogTerm {
-				response.ConflictTerm = rf.log[i].Term
-				response.ConflictIndex = rf.getFirstLog(rf.log[i].Term)
+			if rf.logs[i].Term <= request.PrevLogTerm {
+				response.ConflictTerm = rf.logs[i].Term
+				response.ConflictIndex = rf.getConflictIndex(rf.logs[i].Term)
 				if response.ConflictIndex == request.PrevLogIndex && response.ConflictIndex > 0 {
 					// 获取含有日志的上一个任期
-					prevLog := rf.log[response.ConflictIndex-1]
+					prevLog := rf.logs[response.ConflictIndex-1]
 					response.ConflictTerm = prevLog.Term
-					response.ConflictIndex = rf.getFirstLog(prevLog.Term)
+					response.ConflictIndex = rf.getConflictIndex(prevLog.Term)
 				}
 				break
 			}
@@ -235,23 +233,23 @@ func (rf *Raft) replicate(peer int, syncCommit bool) {
 			request.Entries = []LogEntry{lastLog}
 		}
 	} else {
-		if rf.nextIndex[peer] < len(rf.log) {
+		if rf.nextIndex[peer] < len(rf.logs) {
 			// 存在待提交日志
 			rf.DPrintf("peer %d's nextIndex is %d", peer, rf.nextIndex[peer])
-			request.Entries = rf.log[rf.nextIndex[peer]:]
+			request.Entries = rf.logs[rf.nextIndex[peer]:]
 		}
 	}
 
 	// 根据是否携带日志来填充参数
 	if len(request.Entries) > 0 {
-		prevLog := rf.log[request.Entries[0].CommandIndex-1]
+		prevLog := rf.logs[request.Entries[0].CommandIndex-1]
 		request.PrevLogIndex = prevLog.CommandIndex
 		request.PrevLogTerm = prevLog.Term
 		rf.DPrintf("send log %d-%d to %d",
 			request.Entries[0].CommandIndex, request.Entries[len(request.Entries)-1].CommandIndex, peer)
 	} else {
 		request.PrevLogIndex = rf.nextIndex[peer] - 1
-		request.PrevLogTerm = rf.log[rf.nextIndex[peer]-1].Term
+		request.PrevLogTerm = rf.logs[rf.nextIndex[peer]-1].Term
 		rf.DPrintf("send heartbeat %+v to %d", request, peer)
 	}
 	rf.Unlock("replicate")
@@ -289,7 +287,7 @@ func (rf *Raft) replicate(peer int, syncCommit bool) {
 			oldNextIndex := rf.nextIndex[peer]
 
 			// 检查冲突日志
-			if len(rf.log) > response.ConflictIndex && rf.log[response.ConflictIndex].Term == response.ConflictTerm {
+			if len(rf.logs) > response.ConflictIndex && rf.logs[response.ConflictIndex].Term == response.ConflictTerm {
 				// 如果日志匹配的话，下次就从这条日志发起
 				nextIndex = response.ConflictIndex
 			} else {
@@ -344,7 +342,7 @@ type Raft struct {
 	role        Role       // 服务器当前角色
 	currentTerm int        // 服务器已知最新的任期，在服务器首次启动时初始化为 0，单调递增
 	votedFor    int        // 当前任期内接受选票的竞选者 Id，如果没有投给任何候选者则为空
-	log         []LogEntry // 日志条目
+	logs        []LogEntry // 日志条目
 
 	commitIndex int // 已提交的最高的日志条目的索引
 	lastApplied int // 已经被提交到状态机的最后一个日志的索引
@@ -352,21 +350,24 @@ type Raft struct {
 	nextIndex  []int // 对于每一台服务器，下条发送到该机器的日志索引
 	matchIndex []int // 对于每一台服务器，已经复制到该服务器的最高日志条目的索引
 
-	electionTime   time.Time   // go timer reset bugfix
-	electionTimer  *time.Timer // 选举计时器
-	heartbeatTimer *time.Timer // 心跳计时器
+	electionTimeout time.Time   // go timer reset bugfix
+	electionTimer   *time.Timer // 选举计时器
 
 	applyCh chan ApplyMsg
 	plug    int // 心跳时间内积攒一定数目的日志再一起发送
 }
 
+const HeartbeatTimeoutBase = 100
+
 func (rf *Raft) HeartbeatTimeout() time.Duration {
-	return time.Millisecond * 100
+	return time.Millisecond * HeartbeatTimeoutBase
 }
 
+const ElectionTimeoutBase = 1000
+
 func (rf *Raft) ElectionTimeout() time.Duration {
-	rand.Seed(time.Now().Unix() + int64(rf.me))
-	return time.Millisecond * time.Duration(1000+rand.Int63n(500))
+	//rand.Seed(time.Now().Unix() + int64(rf.me))
+	return time.Millisecond * time.Duration(ElectionTimeoutBase+rand.Int63n(ElectionTimeoutBase/2))
 }
 
 // 如果明确 timer 已经expired，并且 t.C 已经被取空，那么可以直接使用 Reset；
@@ -374,6 +375,7 @@ func (rf *Raft) ElectionTimeout() time.Duration {
 // 如果返回 true，说明 timer 还没有 expire，stop 成功删除 timer，可直接 reset；
 // 如果返回 false，说明 stop 前已经 expire，需要显式 drain channel。
 func (rf *Raft) ResetElectionTimeout() {
+	rf.DPrintf("Reset ElectionTimeout")
 	if !rf.electionTimer.Stop() {
 		// 利用一个 select 来包裹 channel drain，这样无论 channel 中是否有数据，drain 都不会阻塞住
 		select {
@@ -382,7 +384,7 @@ func (rf *Raft) ResetElectionTimeout() {
 		}
 	}
 	rf.electionTimer.Reset(rf.ElectionTimeout())
-	rf.electionTime = time.Now()
+	rf.electionTimeout = time.Now().Add(time.Millisecond * ElectionTimeoutBase)
 }
 
 // return currentTerm and whether this server
@@ -415,7 +417,7 @@ func (rf *Raft) persist() {
 	e := labgob.NewEncoder(w)
 	if e.Encode(rf.currentTerm) != nil ||
 		e.Encode(rf.votedFor) != nil ||
-		e.Encode(rf.log) != nil {
+		e.Encode(rf.logs) != nil {
 		rf.DPrintf("------ persist encode error ------")
 	}
 	data := w.Bytes()
@@ -436,16 +438,16 @@ func (rf *Raft) readPersist(data []byte) {
 	d := labgob.NewDecoder(r)
 	var currentTerm int
 	var votedFor int
-	var log []LogEntry
+	var logs []LogEntry
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
-		d.Decode(&log) != nil {
+		d.Decode(&logs) != nil {
 		rf.DPrintf("------ decode error ------")
 		rf.Kill()
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
-		rf.log = log
+		rf.logs = logs
 		rf.DPrintf("====== readPersist currentTerm: %d, votedFor: %d ======", rf.currentTerm, rf.votedFor)
 		rf.printLog()
 	}
@@ -474,14 +476,27 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.Lock("Snapshot")
 	defer rf.Unlock("Snapshot")
 
+	if index > rf.commitIndex {
+		// 不能快照未提交的日志
+		rf.DPrintf("[ERROR]: index %d > commitIndex %d", index, rf.commitIndex)
+		return
+	}
+	if index <= rf.logs[0].CommandIndex {
+		// 不能回退快照日志
+		rf.DPrintf("[ERROR]: index %d <= rf.logs[0].CommandIndex %d", index, rf.logs[0].CommandIndex)
+		return
+	}
+
 	// 避免切片内存泄露
-	rf.log = append([]LogEntry{}, rf.log[index:]...)
+	// 保留最后一条日志用来记录 Last Snap Log
+	logIndex := index - rf.logs[0].CommandIndex
+	rf.logs = append([]LogEntry{}, rf.logs[logIndex:]...)
 
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	if e.Encode(rf.currentTerm) != nil ||
 		e.Encode(rf.votedFor) != nil ||
-		e.Encode(rf.log) != nil {
+		e.Encode(rf.logs) != nil {
 		rf.DPrintf("------ persist encode error ------")
 	}
 	state := w.Bytes()
@@ -580,7 +595,7 @@ func (rf *Raft) startElection() {
 						rf.ResetElectionTimeout()
 						// 每次选举后重新初始化
 						for i := 0; i < len(rf.peers); i++ {
-							rf.nextIndex[i] = len(rf.log)
+							rf.nextIndex[i] = len(rf.logs)
 							rf.matchIndex[i] = 0
 						}
 						// 这里应该要提交一条空日志，但是 2B 测试通不过，所以改为发送最后一条日志来同步提交
@@ -621,10 +636,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		// 添加本地日志
 		log := LogEntry{
 			Term:         rf.currentTerm,
-			CommandIndex: len(rf.log), // 初始有效索引为 1
+			CommandIndex: len(rf.logs), // 初始有效索引为 1
 			Command:      command,
 		}
-		rf.log = append(rf.log, log)
+		rf.logs = append(rf.logs, log)
 		rf.persist()
 		// 请求达到一定数目再一起发送
 		rf.plug += 1
@@ -665,30 +680,56 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) applyCommitLog() {
-	for idx := rf.lastApplied + 1; idx <= rf.commitIndex; idx++ {
-		select {
-		case rf.applyCh <- ApplyMsg{
-			CommandValid: true,
-			Command:      rf.log[idx].Command,
-			CommandIndex: rf.log[idx].CommandIndex,
-		}:
-			rf.DPrintf("====== apply committed log %d ======", idx)
-			rf.lastApplied = idx
-		default:
-			return
-		}
-	}
-}
+//func (rf *Raft) applyCommitLog() {
+//	for idx := rf.lastApplied + 1; idx <= rf.commitIndex; idx++ {
+//		select {
+//		case rf.applyCh <- ApplyMsg{
+//			CommandValid: true,
+//			Command:      rf.logs[idx].Command,
+//			CommandIndex: rf.logs[idx].CommandIndex,
+//		}:
+//			rf.DPrintf("====== apply committed log %d ======", idx)
+//			rf.lastApplied = idx
+//		default:
+//			return
+//		}
+//	}
+//}
+
+// 更新状态机
+//func (rf *Raft) apply() {
+//	for rf.killed() == false {
+//		time.Sleep(time.Millisecond)
+//		if rf.lastApplied < rf.commitIndex {
+//			rf.Lock("applyCommitLog")
+//			rf.applyCommitLog()
+//			rf.Unlock("applyCommitLog")
+//		}
+//	}
+//}
 
 // 更新状态机
 func (rf *Raft) apply() {
 	for rf.killed() == false {
-		time.Sleep(time.Millisecond)
 		if rf.lastApplied < rf.commitIndex {
-			rf.Lock("applyCommitLog")
-			rf.applyCommitLog()
-			rf.Unlock("applyCommitLog")
+			applyMsgs := make([]ApplyMsg, 0)
+			// 先把要提交的日志整合出来，避免占用锁
+			rf.Lock("apply")
+			for idx := rf.lastApplied + 1; idx <= rf.commitIndex; idx++ {
+				applyMsgs = append(applyMsgs, ApplyMsg{
+					CommandValid: true,
+					Command:      rf.logs[idx].Command,
+					CommandIndex: rf.logs[idx].CommandIndex,
+				})
+			}
+			rf.Unlock("apply")
+			for _, applyMsg := range applyMsgs {
+				select {
+				case rf.applyCh <- applyMsg:
+					rf.DPrintf("====== apply committed log %d ======", applyMsg.CommandIndex)
+					rf.lastApplied = applyMsg.CommandIndex
+				}
+			}
 		}
 	}
 }
@@ -713,13 +754,13 @@ func (rf *Raft) commitCheck(commitIndex int) bool {
 
 func (rf *Raft) commitLog() {
 	low := rf.commitIndex + 1
-	high := len(rf.log) - 1
+	high := len(rf.logs) - 1
 	if low > high {
 		return
 	}
 	// 只能提交当前任期的日志，但由于测试没法提交空日志，所以这里有 liveness 的问题
-	for i := high; i >= low && rf.log[i].Term == rf.currentTerm; i-- {
-		if rf.commitCheck(i) && rf.commitIndex < i {
+	for i := high; i >= low && rf.logs[i].Term == rf.currentTerm; i-- {
+		if rf.commitCheck(i) {
 			rf.commitIndex = i
 			rf.DPrintf("====== commit log %d ======", i)
 			return
@@ -732,12 +773,14 @@ func (rf *Raft) commitLog() {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
+	heartbeatTicker := time.NewTicker(rf.HeartbeatTimeout())
+	rf.electionTimer = time.NewTimer(rf.ElectionTimeout())
 	rf.ResetElectionTimeout()
 	for rf.killed() == false {
 		select {
 		case <-rf.electionTimer.C:
 			rf.Lock("electionTimer")
-			if rf.electionTime.Add(rf.HeartbeatTimeout()).After(time.Now()) {
+			if time.Now().Before(rf.electionTimeout) {
 				// go timer reset 的 bug：
 				// 如果 sendTime 的执行发生在 drain channel 执行后，那么问题就来了，
 				// 虽然 Stop 返回 false（因为 timer 已经 expire），但 drain channel 并没有读出任何数据。
@@ -749,14 +792,15 @@ func (rf *Raft) ticker() {
 				continue
 			}
 			// 开始竞选，任期加一
+			rf.DPrintf("====== election timeout ======")
 			rf.role = Candidate
 			rf.currentTerm += 1
-			rf.votedFor = -1
-			rf.persist()
+			//rf.votedFor = -1
+			//rf.persist()
 			rf.startElection()
 			rf.ResetElectionTimeout()
 			rf.Unlock("electionTimer")
-		case <-rf.heartbeatTimer.C:
+		case <-heartbeatTicker.C:
 			rf.Lock("heartbeatTimer")
 			if rf.role == Leader {
 				// 更新提交索引
@@ -765,7 +809,6 @@ func (rf *Raft) ticker() {
 				rf.broadcast(false)
 				rf.ResetElectionTimeout()
 			}
-			rf.heartbeatTimer.Reset(rf.HeartbeatTimeout())
 			rf.Unlock("heartbeatTimer")
 		}
 	}
@@ -792,7 +835,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		role:        Follower,
 		currentTerm: 0,
 		votedFor:    -1,
-		log:         make([]LogEntry, 0),
+		logs:        make([]LogEntry, 0),
 		commitIndex: 0,
 		lastApplied: 0,
 		nextIndex:   make([]int, len(peers)),
@@ -800,9 +843,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		applyCh:     applyCh,
 		plug:        0,
 	}
-	rf.log = append(rf.log, LogEntry{})
-	rf.heartbeatTimer = time.NewTimer(rf.HeartbeatTimeout())
-	rf.electionTimer = time.NewTimer(rf.ElectionTimeout())
+	rf.logs = append(rf.logs, LogEntry{})
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

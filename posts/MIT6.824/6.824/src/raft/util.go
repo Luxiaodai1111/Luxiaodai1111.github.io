@@ -10,7 +10,7 @@ func init() {
 }
 
 // Debugging
-const Debug = true
+const Debug = false
 
 func (rf *Raft) DPrintf(format string, a ...interface{}) {
 	if Debug {
@@ -30,7 +30,7 @@ func (rf *Raft) DPrintf(format string, a ...interface{}) {
 func (rf *Raft) printLog() {
 	if Debug {
 		logs := "log:"
-		for _, l := range rf.log {
+		for _, l := range rf.logs {
 			logs += fmt.Sprintf("(%d, %d)", l.Term, l.CommandIndex)
 		}
 		logs += "\n"
