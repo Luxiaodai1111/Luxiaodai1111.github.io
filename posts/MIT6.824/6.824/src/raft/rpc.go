@@ -1,13 +1,14 @@
 package raft
 
 type InstallSnapshotArgs struct {
-	Term             int    // leader 任期
-	LeaderId         int    // 用来 follower 把客户端请求重定向到 leader
-	LastIncludeIndex int    // 快照中包含的最后日志条目的索引值
-	LastIncludeTerm  int    // 快照中包含的最后日志条目的任期号
-	offset           int    //分块在快照中的字节偏移量
-	data             []byte // 从偏移量开始的快照分块的原始字节
-	done             bool   // 如果这是最后一个分块则为 true
+	Term     int // leader 任期
+	LeaderId int // 用来 follower 把客户端请求重定向到 leader
+	//LastIncludeIndex int      // 快照中包含的最后日志条目的索引值
+	//LastIncludeTerm  int      // 快照中包含的最后日志条目的任期号
+	Offset      int      //分块在快照中的字节偏移量
+	Data        []byte   // 从偏移量开始的快照分块的原始字节
+	Done        bool     // 如果这是最后一个分块则为 true
+	LastSnapLog LogEntry // 快照最后一条日志内容
 }
 
 type InstallSnapshotReply struct {

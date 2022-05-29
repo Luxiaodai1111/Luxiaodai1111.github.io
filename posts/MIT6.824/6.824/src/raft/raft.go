@@ -80,7 +80,94 @@ func (rf *Raft) Unlock(owner string) {
 }
 
 func (rf *Raft) InstallSnapshot(request *InstallSnapshotArgs, response *InstallSnapshotReply) {
-	// TODO
+	rf.Lock("InstallSnapshot")
+	defer rf.Unlock("InstallSnapshot")
+	response.Term = rf.currentTerm
+	if request.Term < rf.currentTerm {
+		rf.DPrintf("refuse InstallSnapshot from %d", request.LeaderId)
+		return
+	}
+
+	rf.checkTerm(request.LeaderId, request.Term)
+	rf.SaveStateAndSnapshot(request.Data)
+	findMatchLog := false
+	for idx := 0; idx < len(rf.logs); idx++ {
+		if rf.logs[idx].CommandIndex == request.LastSnapLog.CommandIndex &&
+			rf.logs[idx].Term == request.LastSnapLog.Term {
+			rf.logs = append([]LogEntry{}, rf.logs[idx:]...)
+			rf.DPrintf("update logs")
+			rf.printLog()
+			findMatchLog = true
+			break
+		}
+	}
+	if !findMatchLog {
+		rf.logs = append([]LogEntry{}, request.LastSnapLog)
+		rf.DPrintf("update logs")
+		rf.printLog()
+	}
+
+	if request.LastSnapLog.CommandIndex > rf.lastApplied {
+		rf.internalApplyList = append(rf.internalApplyList, ApplyMsg{
+			CommandValid:  false,
+			Command:       nil,
+			CommandIndex:  0,
+			SnapshotValid: true,
+			Snapshot:      request.Data,
+			SnapshotTerm:  request.LastSnapLog.Term,
+			SnapshotIndex: request.LastSnapLog.CommandIndex,
+		})
+	}
+}
+
+func (rf *Raft) sendSnap(peer int) {
+	rf.Lock("sendSnap")
+	if rf.role != Leader {
+		rf.Unlock("sendSnap")
+		rf.DPrintf("now is not leader, cancel send snap")
+		return
+	}
+	if rf.logs[0].CommandIndex <= rf.nextIndex[peer] {
+		rf.Unlock("sendSnap")
+		rf.DPrintf("no need sendSnap")
+		return
+	}
+	request := &InstallSnapshotArgs{
+		Term:        rf.currentTerm,
+		LeaderId:    rf.me,
+		Offset:      0,
+		Data:        rf.persister.ReadSnapshot(),
+		Done:        true, // 不分片，一次传输
+		LastSnapLog: rf.logs[0],
+	}
+	rf.Unlock("sendSnap")
+
+	rf.DPrintf("====== sendSnap %+v to %d", request, peer)
+	response := new(InstallSnapshotReply)
+	if rf.sendInstallSnapshot(peer, request, response) {
+		rf.DPrintf("receive InstallSnapshotReply from %d, response is %+v", peer, response)
+		rf.Lock("recvInstallSnapshotReply")
+		defer rf.Unlock("recvInstallSnapshotReply")
+
+		// 过期轮次的回复直接丢弃
+		if request.Term < rf.currentTerm {
+			return
+		}
+
+		rf.checkTerm(peer, response.Term)
+
+		if rf.role != Leader {
+			rf.DPrintf("now is not leader")
+			return
+		}
+
+		rf.matchIndex[peer] = request.LastSnapLog.CommandIndex
+		rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+		rf.DPrintf("peer %d's matchIndex is %d", peer, rf.matchIndex[peer])
+
+		go rf.replicate(peer, false)
+	}
+
 }
 
 // 根据绝对索引获取相对索引处的日志
@@ -90,6 +177,7 @@ func (rf *Raft) log(index int) LogEntry {
 
 // 根据绝对索引获取相对索引
 func (rf *Raft) index(index int) int {
+	rf.DPrintf("index : %d, rf.logs[0].CommandIndex: %d", index, rf.logs[0].CommandIndex)
 	return index - rf.logs[0].CommandIndex
 }
 
@@ -124,6 +212,21 @@ func (rf *Raft) getConflictIndex(term int) (ConflictIndex int) {
 	return rf.logs[0].CommandIndex
 }
 
+// 检查日志是否匹配
+func (rf *Raft) checkLogMatch(PrevLogIndex int, PrevLogTerm int) bool {
+	lastLog := rf.getLastLog()
+	if rf.logs[0].CommandIndex <= PrevLogIndex && PrevLogIndex <= lastLog.CommandIndex &&
+		rf.log(PrevLogIndex).Term == PrevLogTerm {
+		// 日志在 logs 中存在且匹配
+		return true
+	} else if PrevLogIndex < rf.logs[0].CommandIndex {
+		// 日志在快照中，一定匹配
+		return true
+	}
+
+	return false
+}
+
 func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntriesReply) {
 	rf.Lock("AppendEntries")
 	defer rf.Unlock("AppendEntries")
@@ -142,13 +245,14 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 
 	// 检查日志
 	rf.DPrintf("PrevLogIndex: %d, PrevLogTerm: %d, LeaderCommit: %d", request.PrevLogIndex, request.PrevLogTerm, request.LeaderCommit)
-	if len(rf.logs) > request.PrevLogIndex && rf.log(request.PrevLogIndex).Term == request.PrevLogTerm {
-		// 追加日志
+	if rf.checkLogMatch(request.PrevLogIndex, request.PrevLogTerm) {
+		// 日志匹配，追加日志
 		if len(request.Entries) > 0 {
 			// 本地日志要更新一些，拒绝接收
 			lastLog := rf.getLastLog()
 			lastEntry := request.Entries[len(request.Entries)-1]
 			if lastLog.Term > lastEntry.Term || (lastLog.Term == lastEntry.Term && lastLog.CommandIndex > lastEntry.CommandIndex) {
+				// TODO：让对端变成 follower
 				rf.DPrintf("local log is newer than %d, refuse to recv log", request.LeaderId)
 				response.Success = false
 				response.ConflictTerm = request.PrevLogTerm
@@ -159,7 +263,8 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 			if lastEntry.CommandIndex > rf.commitIndex {
 				// 不要重复追加日志
 				for idx, entry := range request.Entries {
-					if lastLog.CommandIndex < entry.CommandIndex || entry.Term != rf.log(entry.CommandIndex).Term {
+					if lastLog.CommandIndex < entry.CommandIndex ||
+						(rf.logs[0].CommandIndex <= entry.CommandIndex && entry.Term != rf.log(entry.CommandIndex).Term) {
 						rf.logs = append(rf.logs[:rf.index(entry.CommandIndex)], request.Entries[idx:]...)
 						rf.persist()
 						rf.DPrintf("====== append log %d-%d ======", entry.CommandIndex, lastEntry.CommandIndex)
@@ -189,16 +294,18 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 		response.Success = false
 		rf.role = Follower
 		// 如果存在一条日志索引和 prevLogIndex 相等，但是任期和 prevLogItem 不相同的日志，需要删除这条日志及所有后继日志。
-		if len(rf.logs) > request.PrevLogIndex && rf.log(request.PrevLogIndex).Term != request.Term {
+		lastLog := rf.getLastLog()
+		if rf.logs[0].CommandIndex <= request.PrevLogIndex && request.PrevLogIndex <= lastLog.CommandIndex &&
+			rf.log(request.PrevLogIndex).Term != request.Term {
 			rf.DPrintf("====== delete log from %d ======", request.PrevLogIndex)
 			rf.logs = rf.logs[:rf.index(request.PrevLogIndex)]
 			//rf.persist()
 		}
 		// 加速日志冲突检查, 获取不大于 request.PrevLogTerm 且包含日志的冲突条目
-		lastLog := rf.getLastLog()
-		for i := lastLog.CommandIndex; i >= 0; i-- {
-			if rf.log(i).Term <= request.PrevLogTerm {
-				response.ConflictTerm = rf.log(i).Term
+		lastLog = rf.getLastLog()
+		for idx := lastLog.CommandIndex; idx >= 0; idx-- {
+			if rf.log(idx).Term <= request.PrevLogTerm {
+				response.ConflictTerm = rf.log(idx).Term
 				response.ConflictIndex = rf.getConflictIndex(response.ConflictTerm)
 				if response.ConflictIndex == request.PrevLogIndex && response.ConflictIndex > 0 {
 					// 获取含有日志的上一个任期
@@ -240,14 +347,19 @@ func (rf *Raft) replicate(peer int, syncCommit bool) {
 		LeaderCommit: rf.commitIndex,
 		Entries:      nil,
 	}
+	lastLog := rf.getLastLog()
 	if syncCommit {
 		// 成为 Leader 后发送最后一条日志来更新 nextIndex 和 matchIndex 信息
-		lastLog := rf.getLastLog()
-		if lastLog.CommandIndex > 0 {
+		if lastLog.CommandIndex > rf.logs[0].CommandIndex {
 			request.Entries = []LogEntry{lastLog}
 		}
 	} else {
-		if rf.nextIndex[peer] < len(rf.logs) {
+		if rf.nextIndex[peer] <= rf.logs[0].CommandIndex {
+			go rf.sendSnap(peer)
+			rf.Unlock("replicate")
+			return
+		}
+		if rf.nextIndex[peer] < lastLog.CommandIndex+1 {
 			// 存在待提交日志
 			rf.DPrintf("peer %d's nextIndex is %d", peer, rf.nextIndex[peer])
 			request.Entries = rf.logs[rf.index(rf.nextIndex[peer]):]
@@ -299,10 +411,15 @@ func (rf *Raft) replicate(peer int, syncCommit bool) {
 		} else {
 			var nextIndex int
 			oldNextIndex := rf.nextIndex[peer]
+			lastLog = rf.getLastLog()
 
 			// 检查冲突日志
-			if len(rf.logs) > response.ConflictIndex && rf.log(response.ConflictIndex).Term == response.ConflictTerm {
+			if rf.logs[0].CommandIndex <= response.ConflictIndex && response.ConflictIndex <= lastLog.CommandIndex &&
+				rf.log(response.ConflictIndex).Term == response.ConflictTerm {
 				// 如果日志匹配的话，下次就从这条日志发起
+				nextIndex = response.ConflictIndex
+			} else if response.ConflictIndex < rf.logs[0].CommandIndex {
+				// 冲突索引在本地快照中，那么直接发送快照
 				nextIndex = response.ConflictIndex
 			} else {
 				// 如果冲突，则从冲突日志的上一条发起
@@ -322,7 +439,12 @@ func (rf *Raft) replicate(peer int, syncCommit bool) {
 			}
 			// 有冲突要立马再次发送日志去快速同步
 			if rf.nextIndex[peer] < oldNextIndex {
-				go rf.replicate(peer, false)
+				rf.DPrintf("====== Fast Synchronization %d ======", peer)
+				if rf.logs[0].CommandIndex <= rf.nextIndex[peer] {
+					go rf.replicate(peer, false)
+				} else {
+					go rf.sendSnap(peer)
+				}
 			}
 
 			rf.DPrintf("peer %d's nextIndex is %d", peer, rf.nextIndex[peer])
@@ -333,6 +455,7 @@ func (rf *Raft) replicate(peer int, syncCommit bool) {
 }
 
 func (rf *Raft) broadcast(syncCommit bool) {
+	rf.plug = 0
 	for peer := range rf.peers {
 		if peer == rf.me {
 			continue
@@ -367,8 +490,9 @@ type Raft struct {
 	electionTimeout time.Time   // go timer reset bugfix
 	electionTimer   *time.Timer // 选举计时器
 
-	applyCh chan ApplyMsg
-	plug    int // 心跳时间内积攒一定数目的日志再一起发送
+	applyCh           chan ApplyMsg
+	internalApplyList []ApplyMsg // 内部 apply 队列
+	plug              int        // 心跳时间内积攒一定数目的日志再一起发送
 }
 
 const HeartbeatTimeoutBase = 100
@@ -462,6 +586,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.logs = logs
+		rf.lastApplied = rf.logs[0].CommandIndex
 		rf.DPrintf("====== readPersist currentTerm: %d, votedFor: %d ======", rf.currentTerm, rf.votedFor)
 		rf.printLog()
 	}
@@ -477,6 +602,20 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	rf.DPrintf("CondInstallSnapshot")
 
 	return true
+}
+
+func (rf *Raft) SaveStateAndSnapshot(snapshot []byte) {
+	rf.DPrintf("SaveStateAndSnapshot")
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if e.Encode(rf.currentTerm) != nil ||
+		e.Encode(rf.votedFor) != nil ||
+		e.Encode(rf.logs) != nil {
+		rf.DPrintf("------ persist encode error ------")
+	}
+	state := w.Bytes()
+
+	rf.persister.SaveStateAndSnapshot(state, snapshot)
 }
 
 // the service says it has created a snapshot that has
@@ -506,16 +645,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	logIndex := index - rf.logs[0].CommandIndex
 	rf.logs = append([]LogEntry{}, rf.logs[logIndex:]...)
 
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	if e.Encode(rf.currentTerm) != nil ||
-		e.Encode(rf.votedFor) != nil ||
-		e.Encode(rf.logs) != nil {
-		rf.DPrintf("------ persist encode error ------")
-	}
-	state := w.Bytes()
-
-	rf.persister.SaveStateAndSnapshot(state, snapshot)
+	rf.SaveStateAndSnapshot(snapshot)
 }
 
 //
@@ -609,7 +739,7 @@ func (rf *Raft) startElection() {
 						rf.ResetElectionTimeout()
 						// 每次选举后重新初始化
 						for i := 0; i < len(rf.peers); i++ {
-							rf.nextIndex[i] = len(rf.logs)
+							rf.nextIndex[i] = rf.getLastLog().CommandIndex + 1
 							rf.matchIndex[i] = 0
 						}
 						// 这里应该要提交一条空日志，但是 2B 测试通不过，所以改为发送最后一条日志来同步提交
@@ -646,11 +776,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.Lock("Start")
 	defer rf.Unlock("Start")
 	if rf.role == Leader {
+		isLeader = true
 		rf.DPrintf("====== start cmd %+v ======", command)
-		// 添加本地日志
+		// 添加本地日志，后续请求结果会异步发送到 applyCh，index 就是 key
+		index = rf.getLastLog().CommandIndex + 1
+		term = rf.currentTerm
 		log := LogEntry{
-			Term:         rf.currentTerm,
-			CommandIndex: len(rf.logs), // 初始有效索引为 1
+			Term:         term,
+			CommandIndex: index, // 初始有效索引为 1
 			Command:      command,
 		}
 		rf.logs = append(rf.logs, log)
@@ -661,10 +794,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			rf.plug = 0
 			rf.broadcast(false)
 		}
-		// 后续请求结果会异步发送到 applyCh，index 就是 key
-		index = log.CommandIndex
-		term = log.Term
-		isLeader = true
 	}
 
 	return index, term, isLeader
@@ -698,22 +827,29 @@ func (rf *Raft) killed() bool {
 func (rf *Raft) apply() {
 	for rf.killed() == false {
 		if rf.lastApplied < rf.commitIndex {
-			applyMsgs := make([]ApplyMsg, 0)
 			// 先把要提交的日志整合出来，避免占用锁
 			rf.Lock("apply")
-			for idx := rf.lastApplied + 1; idx <= rf.commitIndex; idx++ {
-				applyMsgs = append(applyMsgs, ApplyMsg{
+			for idx := rf.lastApplied + 1; idx <= rf.commitIndex && idx > rf.logs[0].CommandIndex; idx++ {
+				rf.internalApplyList = append(rf.internalApplyList, ApplyMsg{
 					CommandValid: true,
 					Command:      rf.log(idx).Command,
 					CommandIndex: rf.log(idx).CommandIndex,
 				})
 			}
 			rf.Unlock("apply")
-			for _, applyMsg := range applyMsgs {
-				select {
-				case rf.applyCh <- applyMsg:
-					rf.DPrintf("====== apply committed log %d ======", applyMsg.CommandIndex)
-					rf.lastApplied = applyMsg.CommandIndex
+			var internalApplyList = rf.internalApplyList
+			for _, applyMsg := range internalApplyList {
+				if (applyMsg.CommandValid && applyMsg.CommandIndex > rf.lastApplied) ||
+					(applyMsg.SnapshotValid && applyMsg.SnapshotIndex > rf.lastApplied) {
+					rf.applyCh <- applyMsg
+					if applyMsg.SnapshotValid {
+						rf.DPrintf("====== apply snap, committed index: %d ======", applyMsg.SnapshotIndex)
+						rf.lastApplied = applyMsg.SnapshotIndex
+					} else {
+						rf.DPrintf("====== apply committed log %d ======", applyMsg.CommandIndex)
+						rf.lastApplied = applyMsg.CommandIndex
+					}
+
 				}
 			}
 		}
@@ -811,20 +947,21 @@ func (rf *Raft) ticker() {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{
-		peers:       peers,
-		persister:   persister,
-		me:          me,
-		dead:        0,
-		role:        Follower,
-		currentTerm: 0,
-		votedFor:    -1,
-		logs:        make([]LogEntry, 0),
-		commitIndex: 0,
-		lastApplied: 0,
-		nextIndex:   make([]int, len(peers)),
-		matchIndex:  make([]int, len(peers)),
-		applyCh:     applyCh,
-		plug:        0,
+		peers:             peers,
+		persister:         persister,
+		me:                me,
+		dead:              0,
+		role:              Follower,
+		currentTerm:       0,
+		votedFor:          -1,
+		logs:              make([]LogEntry, 0),
+		commitIndex:       0,
+		lastApplied:       0,
+		nextIndex:         make([]int, len(peers)),
+		matchIndex:        make([]int, len(peers)),
+		applyCh:           applyCh,
+		internalApplyList: make([]ApplyMsg, 1024),
+		plug:              0,
 	}
 	rf.logs = append(rf.logs, LogEntry{})
 	rf.electionTimer = time.NewTimer(rf.ElectionTimeout())
