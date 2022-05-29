@@ -133,11 +133,7 @@ func (rf *Raft) sendSnap(peer int) {
 		rf.DPrintf("now is not leader, cancel send snap")
 		return
 	}
-	if rf.logs[0].CommandIndex <= rf.nextIndex[peer] {
-		rf.Unlock("sendSnap")
-		rf.DPrintf("no need sendSnap")
-		return
-	}
+
 	request := &InstallSnapshotArgs{
 		Term:        rf.currentTerm,
 		LeaderId:    rf.me,
@@ -440,11 +436,7 @@ func (rf *Raft) replicate(peer int, syncCommit bool) {
 			// 有冲突要立马再次发送日志去快速同步
 			if rf.nextIndex[peer] < oldNextIndex {
 				rf.DPrintf("====== Fast Synchronization %d ======", peer)
-				if rf.logs[0].CommandIndex <= rf.nextIndex[peer] {
-					go rf.replicate(peer, false)
-				} else {
-					go rf.sendSnap(peer)
-				}
+				go rf.replicate(peer, false)
 			}
 
 			rf.DPrintf("peer %d's nextIndex is %d", peer, rf.nextIndex[peer])
