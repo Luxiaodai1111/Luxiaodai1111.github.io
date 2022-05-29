@@ -110,7 +110,7 @@ $ for i in {0..10}; do go test; done
 
 好了，这次实验和 2A 相比功能就完善很多，所以我们把结构体成员补上，相比论文，这里加了一个 plug 结构体，这是为了性能考虑，当应用发起请求时，如果每条请求我们都发送一条 RPC 那么效率就太低了，所以我们增加了一个阈值，如果单位时间内请求小于阈值，那么就等心跳去发送日志，如果流量过大，则立马发送日志，这也是 2B 测试里的一项。
 
-electionTime 字段也是论文没有的，这是为了屏蔽 go timer 的 bug 用的，在选举的时候再说是什么问题。
+竞选超时我用了 electionTimer 和 electionTimeout 两个字段，理论上一个字段就行，但是这是为了屏蔽 go timer 的 bug，所以设置了冗余的字段。
 
 ```go
 type LogEntry struct {
@@ -129,7 +129,7 @@ type Raft struct {
 	role        Role       // 服务器当前角色
 	currentTerm int        // 服务器已知最新的任期，在服务器首次启动时初始化为 0，单调递增
 	votedFor    int        // 当前任期内接受选票的竞选者 Id，如果没有投给任何候选者则为空
-	log         []LogEntry // 日志条目
+	logs        []LogEntry // 日志条目
 
 	commitIndex int // 已提交的最高的日志条目的索引
 	lastApplied int // 已经被提交到状态机的最后一个日志的索引
@@ -137,16 +137,15 @@ type Raft struct {
 	nextIndex  []int // 对于每一台服务器，下条发送到该机器的日志索引
 	matchIndex []int // 对于每一台服务器，已经复制到该服务器的最高日志条目的索引
 
-	electionTime   time.Time   // go timer reset bugfix
-	electionTimer  *time.Timer // 选举计时器
-	heartbeatTimer *time.Timer // 心跳计时器
+	electionTimeout time.Time   // go timer reset bugfix
+	electionTimer   *time.Timer // 选举计时器
 
 	applyCh chan ApplyMsg
 	plug    int // 心跳时间内积攒一定数目的日志再一起发送
 }
 ```
 
-选举的 RPC 结构体和论文一样，AppendEntriesReply RPC 结构体增加了两个字段 ConflictTerm 和 ConflictIndex，这为了实现了论文中快速找到冲突条目的优化，这里我也实现得非常简单，就是按论文里任期来跳着找。
+选举的 RPC 结构体和论文一样，AppendEntriesReply RPC 结构体增加了两个字段 ConflictTerm 和 ConflictIndex，这为了实现了论文中快速找到冲突条目的优化，这里我也实现得非常简单，就是按论文里建议的按任期跳着找。
 
 ```go
 type AppendEntriesArgs struct {
@@ -195,7 +194,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		role:        Follower,
 		currentTerm: 0,
 		votedFor:    -1,
-		log:         make([]LogEntry, 0),
+		logs:        make([]LogEntry, 0),
 		commitIndex: 0,
 		lastApplied: 0,
 		nextIndex:   make([]int, len(peers)),
@@ -203,8 +202,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		applyCh:     applyCh,
 		plug:        0,
 	}
-	rf.log = append(rf.log, LogEntry{})
-	rf.heartbeatTimer = time.NewTimer(rf.HeartbeatTimeout())
+	rf.logs = append(rf.logs, LogEntry{})
 	rf.electionTimer = time.NewTimer(rf.ElectionTimeout())
 
 	// initialize from state persisted before a crash
@@ -223,15 +221,17 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 ## 流程框架设计
 
-这里主要有两个协程，一个用于超时检查，一个用于更新状态机。超时的设计和 2A 类似，这里把提交日志检查的操作与心跳合在一起了，没有用单独的协程去处理。
+这里主要有两个协程，ticker 用于超时检查，apply 用于更新状态机。超时的设计和 2A 类似，这里把提交日志检查的操作放在心跳里了，没有用单独的协程去处理。
 
 ```go
 func (rf *Raft) ticker() {
+	heartbeatTicker := time.NewTicker(rf.HeartbeatTimeout())
+	rf.ResetElectionTimeout()
 	for rf.killed() == false {
 		select {
 		case <-rf.electionTimer.C:
 			rf.Lock("electionTimer")
-			if rf.electionTime.Add(time.Millisecond * ElectionTimeoutBase).After(time.Now()) {
+			if time.Now().Before(rf.electionTimeout) {
 				// go timer reset 的 bug：
 				// 如果 sendTime 的执行发生在 drain channel 执行后，那么问题就来了，
 				// 虽然 Stop 返回 false（因为 timer 已经 expire），但 drain channel 并没有读出任何数据。
@@ -242,23 +242,21 @@ func (rf *Raft) ticker() {
 				rf.Unlock("electionTimer")
 				continue
 			}
-			rf.ResetElectionTimeout()
 			// 开始竞选，任期加一
+			rf.DPrintf("====== election timeout ======")
 			rf.role = Candidate
 			rf.currentTerm += 1
-			rf.votedFor = -1
-			rf.persist()
 			rf.startElection()
+			rf.ResetElectionTimeout()
 			rf.Unlock("electionTimer")
-		case <-rf.heartbeatTimer.C:
+		case <-heartbeatTicker.C:
 			rf.Lock("heartbeatTimer")
-			rf.ResetHeartbeatTimeout()
 			if rf.role == Leader {
-				rf.ResetElectionTimeout()
 				// 更新提交索引
 				rf.commitLog()
 				// Leader 定期发送心跳
 				rf.broadcast(false)
+				rf.ResetElectionTimeout()
 			}
 			rf.Unlock("heartbeatTimer")
 		}
@@ -266,7 +264,7 @@ func (rf *Raft) ticker() {
 }
 ```
 
-提交和更新状态机我们下面介绍，选举和 2A 类似，对于发送日志条目，这里和论文一样，没有分开心跳和追加日志。broadcast 会调用 replicate 方法，在 replicate 方法里根据当前状态决定发送的 RPC 请求。
+提交和更新状态机我们下面介绍，选举和 2A 类似，对于发送日志条目，这里和论文一样，没有分开心跳和追加日志。broadcast 会调用 replicate 方法，在 replicate 方法里根据当前状态决定发送的 RPC 请求是否携带日志。
 
 ```go
 func (rf *Raft) broadcast(syncCommit bool) {
@@ -281,7 +279,7 @@ func (rf *Raft) broadcast(syncCommit bool) {
 }
 ```
 
-当选主成功后，日志会在两个时机被发送，一个是上层调用 Start 的请求达到阈值，一个就是心跳定时发送 broadcast。对于 Start 发送的请求，我们只需要加入到本地日志列表就可以返回了，等提交后再通过 applyCh 告知应用，这里做的一个小优化就是请求达到阈值才会发送一轮日志，否则就会等到心跳超时发送，这可以大大减少 RPC 交互数目。
+当选主成功后，日志会在两个时机被发送，一个是上层调用 Start 的请求达到阈值，一个就是心跳定时发送 broadcast。对于 Start 发送的请求，我们只需要加入到本地日志列表就可以返回了，等提交后再通过 applyCh 告知应用，这里做的一个小优化就是请求达到阈值才会发送一轮日志，否则就会随着心跳发送，这可以大大减少 RPC 交互数目。
 
 ```go
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
@@ -297,10 +295,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		// 添加本地日志
 		log := LogEntry{
 			Term:         rf.currentTerm,
-			CommandIndex: len(rf.log), // 初始有效索引为 1
+			CommandIndex: len(rf.logs), // 初始有效索引为 1
 			Command:      command,
 		}
-		rf.log = append(rf.log, log)
+		rf.logs = append(rf.logs, log)
 		rf.persist()
 		// 请求达到一定数目再一起发送
 		rf.plug += 1
@@ -324,33 +322,32 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 ## 提交和更新状态机
 
-请求只要超过半数复制成功就可以提交日志了，但是要注意的是，**只能提交当前任期的日志**，已经提交的日志就可以更新状态机，注意别让通道阻塞协程。这里我没有使用条件变量，而是采用了休眠轮询的方法，实现更简单点。
+请求只要超过半数复制成功就可以提交日志了，但是要注意的是，**只能提交当前任期的日志**，已经提交的日志就可以更新状态机，注意别让通道阻塞协程。这里我没有使用条件变量，而是采用了轮询的方法，实现更简单点。
+
+另外，更新状态机的时候我并没有全程加锁，因为 lastApplied 和 commitIndex 及时读到过期数据也只会说下一次轮询来更新，并不会有什么大的影响，lastApplied 只会在本协程里更新，所以可以不加锁，另外往 applyCh 通道发送数据可能会阻塞，所以此时一定不能加锁。
 
 ```go
-func (rf *Raft) applyCommitLog() {
-	for idx := rf.lastApplied + 1; idx <= rf.commitIndex; idx++ {
-		select {
-		case rf.applyCh <- ApplyMsg{
-			CommandValid: true,
-			Command:      rf.log[idx].Command,
-			CommandIndex: rf.log[idx].CommandIndex,
-		}:
-			rf.DPrintf("====== apply committed log %d ======", idx)
-			rf.lastApplied = idx
-		default:
-			return
-		}
-	}
-}
-
-// 更新状态机
 func (rf *Raft) apply() {
 	for rf.killed() == false {
-		time.Sleep(time.Millisecond)
 		if rf.lastApplied < rf.commitIndex {
-			rf.Lock("applyCommitLog")
-			rf.applyCommitLog()
-			rf.Unlock("applyCommitLog")
+			applyMsgs := make([]ApplyMsg, 0)
+			// 先把要提交的日志整合出来，避免占用锁
+			rf.Lock("apply")
+			for idx := rf.lastApplied + 1; idx <= rf.commitIndex; idx++ {
+				applyMsgs = append(applyMsgs, ApplyMsg{
+					CommandValid: true,
+					Command:      rf.log(idx).Command,
+					CommandIndex: rf.log(idx).CommandIndex,
+				})
+			}
+			rf.Unlock("apply")
+			for _, applyMsg := range applyMsgs {
+				select {
+				case rf.applyCh <- applyMsg:
+					rf.DPrintf("====== apply committed log %d ======", applyMsg.CommandIndex)
+					rf.lastApplied = applyMsg.CommandIndex
+				}
+			}
 		}
 	}
 }
@@ -375,13 +372,13 @@ func (rf *Raft) commitCheck(commitIndex int) bool {
 
 func (rf *Raft) commitLog() {
 	low := rf.commitIndex + 1
-	high := len(rf.log) - 1
+	high := rf.getLastLog().CommandIndex
 	if low > high {
 		return
 	}
 	// 只能提交当前任期的日志，但由于测试没法提交空日志，所以这里有 liveness 的问题
-	for i := high; i >= low && rf.log[i].Term == rf.currentTerm; i-- {
-		if rf.commitCheck(i) && rf.commitIndex < i {
+	for i := high; i >= low && rf.log(i).Term == rf.currentTerm; i-- {
+		if rf.commitCheck(i) {
 			rf.commitIndex = i
 			rf.DPrintf("====== commit log %d ======", i)
 			return
@@ -460,7 +457,7 @@ func (rf *Raft) startElection() {
 						rf.ResetElectionTimeout()
 						// 每次选举后重新初始化
 						for i := 0; i < len(rf.peers); i++ {
-							rf.nextIndex[i] = len(rf.log)
+							rf.nextIndex[i] = len(rf.logs)
 							rf.matchIndex[i] = 0
 						}
 						// 这里应该要提交一条空日志，但是 2B 测试通不过，所以改为发送最后一条日志来同步提交
@@ -502,11 +499,11 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply
 	// 投票，重复回复也没事，TCP 会帮你处理掉的
 	rf.DPrintf("vote for %d", request.CandidateId)
 	// 既然要投票给别人，那自己肯定就不竞选了
-	rf.ResetElectionTimeout()
 	rf.role = Follower
 	rf.votedFor = request.CandidateId
 	rf.persist()
 	response.Term, response.VoteGranted = rf.currentTerm, true
+	rf.ResetElectionTimeout()
 }
 ```
 
@@ -528,10 +525,10 @@ func (rf *Raft) checkTerm(peer int, term int) {
 另外竞选的重置应该在如下时机：
 
 1.  开始竞选时
-2.  竞选成功后，且定期重置
+2.  竞选成功后，且需要定期重置
 3.  认可别人的日志条目时（包括冲突）
 
-另外 Timer 确实很多坑，首先是 Reset 的用法，这里可以参考[论golang Timer Reset方法使用的正确姿势](https://tonybai.com/2016/12/21/how-to-use-timer-reset-in-golang-correctly/)，包括 bug 在文章里也提及了。
+另外 Timer 确实很多坑，首先是 Reset 的用法，这里可以参考 [论golang Timer Reset方法使用的正确姿势](https://tonybai.com/2016/12/21/how-to-use-timer-reset-in-golang-correctly/)，包括 bug 在文章里也提及了。
 
 ```go
 const HeartbeatTimeoutBase = 100
@@ -540,21 +537,11 @@ func (rf *Raft) HeartbeatTimeout() time.Duration {
 	return time.Millisecond * HeartbeatTimeoutBase
 }
 
-func (rf *Raft) ResetHeartbeatTimeout() {
-	if !rf.heartbeatTimer.Stop() {
-		select {
-		case <-rf.heartbeatTimer.C:
-		default:
-		}
-	}
-	rf.heartbeatTimer.Reset(rf.HeartbeatTimeout())
-}
-
-const ElectionTimeoutBase = 1000
+const ElectionTimeoutBase = 500
 
 func (rf *Raft) ElectionTimeout() time.Duration {
-	rand.Seed(time.Now().Unix() + int64(rf.me))
-	return time.Millisecond * time.Duration(ElectionTimeoutBase+rand.Int63n(ElectionTimeoutBase/2))
+	//rand.Seed(time.Now().Unix() + int64(rf.me))
+	return time.Millisecond * time.Duration(ElectionTimeoutBase+rand.Int63n(ElectionTimeoutBase))
 }
 
 // 如果明确 timer 已经expired，并且 t.C 已经被取空，那么可以直接使用 Reset；
@@ -562,7 +549,7 @@ func (rf *Raft) ElectionTimeout() time.Duration {
 // 如果返回 true，说明 timer 还没有 expire，stop 成功删除 timer，可直接 reset；
 // 如果返回 false，说明 stop 前已经 expire，需要显式 drain channel。
 func (rf *Raft) ResetElectionTimeout() {
-	rf.electionTime = time.Now()
+	rf.DPrintf("Reset ElectionTimeout")
 	if !rf.electionTimer.Stop() {
 		// 利用一个 select 来包裹 channel drain，这样无论 channel 中是否有数据，drain 都不会阻塞住
 		select {
@@ -571,22 +558,23 @@ func (rf *Raft) ResetElectionTimeout() {
 		}
 	}
 	rf.electionTimer.Reset(rf.ElectionTimeout())
+	rf.electionTimeout = time.Now().Add(time.Millisecond * ElectionTimeoutBase)
 }
 ```
 
 在 ticker 协程里选举超时时，额外判断间距上次重置的时间是否过短，如果过短那就是 bug 触发了。我用的 go 版本是 1.17.9。这个可能几百上千遍才会偶然触发一次，所以实际为了通过这个实验，我测试了 5000 遍才算过。
 
 ```go
-if rf.electionTime.Add(rf.HeartbeatTimeout()).After(time.Now()) {
+if time.Now().Before(rf.electionTimeout) {
     // go timer reset 的 bug：
     // 如果 sendTime 的执行发生在 drain channel 执行后，那么问题就来了，
     // 虽然 Stop 返回 false（因为 timer 已经 expire），但 drain channel 并没有读出任何数据。
     // 之后，sendTime 将数据发到 channel 中。timer Reset 后的 Timer 中的 Channel 实际上已经有了数据
     // 所以我增加了 electionTime 字段，如果与重置时间距离过短，那么就重置这个超时
-    rf.DPrintf("go timer reset bugfix")
-    rf.ResetElectionTimeout()
-    rf.Unlock("electionTimer")
-    continue
+	rf.DPrintf("go timer reset bugfix")
+	rf.ResetElectionTimeout()
+	rf.Unlock("electionTimer")
+	continue
 }
 ```
 
@@ -619,23 +607,23 @@ func (rf *Raft) replicate(peer int, syncCommit bool) {
 			request.Entries = []LogEntry{lastLog}
 		}
 	} else {
-		if rf.nextIndex[peer] < len(rf.log) {
+		if rf.nextIndex[peer] < len(rf.logs) {
 			// 存在待提交日志
 			rf.DPrintf("peer %d's nextIndex is %d", peer, rf.nextIndex[peer])
-			request.Entries = rf.log[rf.nextIndex[peer]:]
+			request.Entries = rf.logs[rf.index(rf.nextIndex[peer]):]
 		}
 	}
 
 	// 根据是否携带日志来填充参数
 	if len(request.Entries) > 0 {
-		prevLog := rf.log[request.Entries[0].CommandIndex-1]
+		prevLog := rf.log(request.Entries[0].CommandIndex - 1)
 		request.PrevLogIndex = prevLog.CommandIndex
 		request.PrevLogTerm = prevLog.Term
 		rf.DPrintf("send log %d-%d to %d",
 			request.Entries[0].CommandIndex, request.Entries[len(request.Entries)-1].CommandIndex, peer)
 	} else {
 		request.PrevLogIndex = rf.nextIndex[peer] - 1
-		request.PrevLogTerm = rf.log[rf.nextIndex[peer]-1].Term
+		request.PrevLogTerm = rf.log(rf.nextIndex[peer] - 1).Term
 		rf.DPrintf("send heartbeat %+v to %d", request, peer)
 	}
 	rf.Unlock("replicate")
@@ -671,16 +659,21 @@ func (rf *Raft) replicate(peer int, syncCommit bool) {
 		} else {
 			var nextIndex int
 			oldNextIndex := rf.nextIndex[peer]
+
 			// 检查冲突日志
-			if len(rf.log) > response.ConflictIndex && rf.log[response.ConflictIndex].Term == response.ConflictTerm {
+			if len(rf.logs) > response.ConflictIndex && rf.log(response.ConflictIndex).Term == response.ConflictTerm {
 				// 如果日志匹配的话，下次就从这条日志发起
 				nextIndex = response.ConflictIndex
 			} else {
 				// 如果冲突，则从冲突日志的上一条发起
-				nextIndex = response.ConflictIndex - 1
+				if response.ConflictIndex <= oldNextIndex {
+					nextIndex = response.ConflictIndex - 1
+				} else {
+					nextIndex = oldNextIndex - 1
+				}
 			}
 			// 冲突索引只能往回退
-			if nextIndex < rf.nextIndex[peer] {
+			if nextIndex < oldNextIndex {
 				rf.nextIndex[peer] = nextIndex
 			}
 			// 索引要大于 matchIndex
@@ -727,7 +720,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 
 	// 检查日志
 	rf.DPrintf("PrevLogIndex: %d, PrevLogTerm: %d, LeaderCommit: %d", request.PrevLogIndex, request.PrevLogTerm, request.LeaderCommit)
-	if len(rf.log) > request.PrevLogIndex && rf.log[request.PrevLogIndex].Term == request.PrevLogTerm {
+	if len(rf.logs) > request.PrevLogIndex && rf.log(request.PrevLogIndex).Term == request.PrevLogTerm {
 		// 追加日志
 		if len(request.Entries) > 0 {
 			// 本地日志要更新一些，拒绝接收
@@ -744,8 +737,8 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 			if lastEntry.CommandIndex > rf.commitIndex {
 				// 不要重复追加日志
 				for idx, entry := range request.Entries {
-					if lastLog.CommandIndex < entry.CommandIndex || entry.Term != rf.log[entry.CommandIndex].Term {
-						rf.log = append(rf.log[:entry.CommandIndex], request.Entries[idx:]...)
+					if lastLog.CommandIndex < entry.CommandIndex || entry.Term != rf.log(entry.CommandIndex).Term {
+						rf.logs = append(rf.logs[:rf.index(entry.CommandIndex)], request.Entries[idx:]...)
 						rf.persist()
 						rf.DPrintf("====== append log %d-%d ======", entry.CommandIndex, lastEntry.CommandIndex)
 						break
@@ -763,8 +756,6 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 				rf.commitIndex = request.LeaderCommit
 			}
 			rf.DPrintf("update commitIndex %d", rf.commitIndex)
-			// 更新状态机
-			rf.applyCommitLog()
 		}
 
 		response.Success = true
@@ -774,29 +765,30 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 		rf.DPrintf("====== log mismatch ======")
 		// 如果自己不存在索引、任期和 prevLogIndex、 prevLogItem 匹配的日志返回 false。
 		response.Success = false
-		// 即使日志冲突但是这里仍然是认可 Leader 的，所以也要重置竞选超时
-		rf.ResetElectionTimeout()
+		rf.role = Follower
 		// 如果存在一条日志索引和 prevLogIndex 相等，但是任期和 prevLogItem 不相同的日志，需要删除这条日志及所有后继日志。
-		if len(rf.log) > request.PrevLogIndex && rf.log[request.PrevLogIndex].Term != request.Term {
+		if len(rf.logs) > request.PrevLogIndex && rf.log(request.PrevLogIndex).Term != request.Term {
 			rf.DPrintf("====== delete log from %d ======", request.PrevLogIndex)
-			rf.log = rf.log[:request.PrevLogIndex]
-			rf.persist()
+			rf.logs = rf.logs[:rf.index(request.PrevLogIndex)]
+			//rf.persist()
 		}
 		// 加速日志冲突检查, 获取不大于 request.PrevLogTerm 且包含日志的冲突条目
 		lastLog := rf.getLastLog()
 		for i := lastLog.CommandIndex; i >= 0; i-- {
-			if rf.log[i].Term <= request.PrevLogTerm {
-				response.ConflictTerm = rf.log[i].Term
-				response.ConflictIndex = rf.getFirstLog(rf.log[i].Term)
+			if rf.log(i).Term <= request.PrevLogTerm {
+				response.ConflictTerm = rf.log(i).Term
+				response.ConflictIndex = rf.getConflictIndex(response.ConflictTerm)
 				if response.ConflictIndex == request.PrevLogIndex && response.ConflictIndex > 0 {
 					// 获取含有日志的上一个任期
-					prevLog := rf.log[response.ConflictIndex-1]
+					prevLog := rf.log(response.ConflictIndex - 1)
 					response.ConflictTerm = prevLog.Term
-					response.ConflictIndex = rf.getFirstLog(prevLog.Term)
+					response.ConflictIndex = rf.getConflictIndex(response.ConflictTerm)
 				}
 				break
 			}
 		}
+		// 即使日志冲突但是这里仍然是认可 Leader 的，所以也要重置竞选超时
+		rf.ResetElectionTimeout()
 	}
 
 	return
@@ -807,15 +799,15 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 
 ```go
 // 获取 term 任期内的第一条日志，这里保证 term 任期内一定有日志
-func (rf *Raft) getFirstLog(term int) (ConflictIndex int) {
+func (rf *Raft) getConflictIndex(term int) (ConflictIndex int) {
 	low := 0
-	high := len(rf.log)
+	high := len(rf.logs)
 	middle := (low + high) / 2
 	// 二分先找到一条包含该任期的日志
 	for ; low < high; middle = (low + high) / 2 {
-		if rf.log[middle].Term == term {
+		if rf.logs[middle].Term == term {
 			break
-		} else if rf.log[middle].Term < term {
+		} else if rf.logs[middle].Term < term {
 			low = middle + 1
 		} else {
 			high = middle - 1
@@ -823,59 +815,91 @@ func (rf *Raft) getFirstLog(term int) (ConflictIndex int) {
 	}
 
 	for i := middle; i >= 0; i-- {
-		if rf.log[i].Term != term {
-			rf.DPrintf("====== getFirstLog in term %d: %d ======", term, i+1)
-			return i + 1
+		if rf.logs[i].Term != term {
+			rf.DPrintf("====== getFirstLog in term %d: %d ======", term, rf.logs[i].CommandIndex+1)
+			return rf.logs[i].CommandIndex + 1
 		}
 	}
 
-	rf.DPrintf("====== getFirstLog in term %d: %d ======", term, 0)
-	return 0
+	rf.DPrintf("====== getFirstLog in term %d: %d ======", term, rf.logs[0].CommandIndex)
+	return rf.logs[0].CommandIndex
 }
 ```
+
+上面很多地方我都没有直接使用 rf.logs 的下标来访问，而是使用了转换函数来处理，这是为了后面快照实验做准备，因为快照会引起日志条目的变化。
+
+```go
+// 根据绝对索引获取相对索引处的日志
+func (rf *Raft) log(index int) LogEntry {
+   return rf.logs[rf.index(index)]
+}
+
+// 根据绝对索引获取相对索引
+func (rf *Raft) index(index int) int {
+   return index - rf.logs[0].CommandIndex
+}
+
+func (rf *Raft) getLastLog() LogEntry {
+   return rf.logs[len(rf.logs)-1]
+}
+```
+
+
+
+## 持久化
 
 持久化的实现没什么可讲的，当 currentTerm，votedFor，log 三个变量变化的时候持久化就行了。ReadPersist 中解析变量的顺序需要和 persist 中持久化变量的顺序相同。
 
 ```go
 func (rf *Raft) persist() {
-   //rf.DPrintf("persist currentTerm: %d, votedFor: %d", rf.currentTerm, rf.votedFor)
-   //rf.printLog()
-   w := new(bytes.Buffer)
-   e := labgob.NewEncoder(w)
-   if e.Encode(rf.currentTerm) != nil ||
-      e.Encode(rf.votedFor) != nil ||
-      e.Encode(rf.log) != nil {
-      rf.DPrintf("------ persist encode error ------")
-   }
-   data := w.Bytes()
-   rf.persister.SaveRaftState(data)
+	// Your code here (2C).
+	// Example:
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if e.Encode(rf.currentTerm) != nil ||
+		e.Encode(rf.votedFor) != nil ||
+		e.Encode(rf.logs) != nil {
+		rf.DPrintf("------ persist encode error ------")
+	}
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
-   rf.DPrintf("====== readPersist ======")
-   if data == nil || len(data) < 1 { // bootstrap without any state?
-      return
-   }
-   r := bytes.NewBuffer(data)
-   d := labgob.NewDecoder(r)
-   var currentTerm int
-   var votedFor int
-   var log []LogEntry
-   if d.Decode(&currentTerm) != nil ||
-      d.Decode(&votedFor) != nil ||
-      d.Decode(&log) != nil {
-      rf.DPrintf("------ decode error ------")
-      rf.Kill()
-   } else {
-      rf.currentTerm = currentTerm
-      rf.votedFor = votedFor
-      rf.log = log
-      rf.DPrintf("====== readPersist currentTerm: %d, votedFor: %d ======", rf.currentTerm, rf.votedFor)
-      rf.printLog()
-   }
+	rf.DPrintf("====== readPersist ======")
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+	// Your code here (2C).
+	// Example:
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var logs []LogEntry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&logs) != nil {
+		rf.DPrintf("------ decode error ------")
+		rf.Kill()
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.logs = logs
+		rf.DPrintf("====== readPersist currentTerm: %d, votedFor: %d ======", rf.currentTerm, rf.votedFor)
+		rf.printLog()
+	}
+}
+
+func (rf *Raft) Kill() {
+	atomic.StoreInt32(&rf.dead, 1)
+	// Your code here, if desired.
+	rf.Lock("Kill")
+	defer rf.Unlock("Kill")
+	rf.persist()
 }
 ```
 
@@ -901,31 +925,31 @@ func (rf *Raft) Unlock(owner string) {
 
 ```go
 func (rf *Raft) printLog() {
-   if Debug {
-      logs := "log:"
-      for _, l := range rf.log {
-         logs += fmt.Sprintf("(%d, %d)", l.Term, l.CommandIndex)
-      }
-      logs += "\n"
-      rf.DPrintf("%s", logs)
-   }
+	if Debug {
+		logs := "log:"
+		for _, l := range rf.logs {
+			logs += fmt.Sprintf("(%d, %d)", l.Term, l.CommandIndex)
+		}
+		logs += "\n"
+		rf.DPrintf("%s", logs)
+	}
 }
 ```
 
 2B 里的 TestBackup2B 和 2C 里的 TestFigure8Unreliable2C 比较难通过一点，你可以单独测试调试。
 
-这里如果你按照论文图 2 里来写就不会有什么问题，有 BUG 就仔细检查图 2 是否提到的点都实现了。另外我推荐写一个并发测试的脚本，因为测试运行得不是很快，你想测试几百遍要很长时间，我是简单粗暴的把代码复制到了 100 个文件夹，然后一起测试把结果输出到文件再检查是否通过。有时候测试了七八百遍才触发一次问题，所以我建议至少测 1000 遍没有问题才算通过吧。
+这里如果你按照论文图 2 里来写就不会有什么问题，有 BUG 就仔细检查图 2 是否提到的点都实现了。另外我推荐写一个并发测试的脚本，因为测试运行得不是很快，你想测试几百遍要很长时间，我是简单粗暴的把代码复制到了 10 个文件夹（不要复制太多，否则 CPU 可能处理不过来导致代码超时引起不必要的问题），然后一起测试把结果输出到文件再检查是否通过。有时候测试了七八百遍才触发一次问题，所以我建议至少测 1000 遍没有问题才算通过吧。
 
 ```bash
 [root@localhost raft]# go test -run 2A
 Test (2A): initial election ...
-  ... Passed --   4.0  3   62   18140    0
+  ... Passed --   3.6  3   61   17980    0
 Test (2A): election after network failure ...
-  ... Passed --   6.3  3  130   28754    0
+  ... Passed --   5.0  3  111   24485    0
 Test (2A): multiple elections ...
-  ... Passed --   7.0  7  678  148956    0
+  ... Passed --   7.1  7  575  124848    0
 PASS
-ok  	6.824/raft	17.293s
+ok  	6.824/raft/test	15.730s
 
 [root@localhost raft]# go test -run 2B
 Test (2B): basic agreement ...
@@ -949,23 +973,23 @@ ok  	6.824/raft	52.862s
 
 [root@localhost raft]# go test -run 2C
 Test (2C): basic persistence ...
-  ... Passed --   7.6  3  103   27349    6
+  ... Passed --   5.5  3   96   25866    6
 Test (2C): more persistence ...
-  ... Passed --  22.1  5 1006  238979   16
+  ... Passed --  19.8  5  964  228099   16
 Test (2C): partitioned leader and one follower crash, leader restarts ...
-  ... Passed --   3.4  3   37    9967    4
+  ... Passed --   2.9  3   39   10666    4
 Test (2C): Figure 8 ...
-  ... Passed --  36.4  5  575  135190   16
+  ... Passed --  34.3  5  800  187172   23
 Test (2C): unreliable agreement ...
-  ... Passed --  10.8  5  404  137625  246
+  ... Passed --   9.6  5  376  128577  246
 Test (2C): Figure 8 (unreliable) ...
-  ... Passed --  38.4  5 3279 7043612  313
+  ... Passed --  45.1  5 3593 7713028  626
 Test (2C): churn ...
-  ... Passed --  16.3  5 1004  803444  122
+  ... Passed --  16.6  5  719  351285  177
 Test (2C): unreliable churn ...
-  ... Passed --  16.3  5  543  311501  139
+  ... Passed --  16.7  5  629  244069  168
 PASS
-ok  	6.824/raft	151.864s
+ok  	6.824/raft/test	150.458s
 
 ```
 

@@ -694,34 +694,6 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-//func (rf *Raft) applyCommitLog() {
-//	for idx := rf.lastApplied + 1; idx <= rf.commitIndex; idx++ {
-//		select {
-//		case rf.applyCh <- ApplyMsg{
-//			CommandValid: true,
-//			Command:      rf.logs[idx].Command,
-//			CommandIndex: rf.logs[idx].CommandIndex,
-//		}:
-//			rf.DPrintf("====== apply committed log %d ======", idx)
-//			rf.lastApplied = idx
-//		default:
-//			return
-//		}
-//	}
-//}
-
-// 更新状态机
-//func (rf *Raft) apply() {
-//	for rf.killed() == false {
-//		time.Sleep(time.Millisecond)
-//		if rf.lastApplied < rf.commitIndex {
-//			rf.Lock("applyCommitLog")
-//			rf.applyCommitLog()
-//			rf.Unlock("applyCommitLog")
-//		}
-//	}
-//}
-
 // 更新状态机
 func (rf *Raft) apply() {
 	for rf.killed() == false {
@@ -808,8 +780,6 @@ func (rf *Raft) ticker() {
 			rf.DPrintf("====== election timeout ======")
 			rf.role = Candidate
 			rf.currentTerm += 1
-			//rf.votedFor = -1
-			//rf.persist()
 			rf.startElection()
 			rf.ResetElectionTimeout()
 			rf.Unlock("electionTimer")
