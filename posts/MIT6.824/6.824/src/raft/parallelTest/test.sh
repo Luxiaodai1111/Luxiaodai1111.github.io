@@ -7,9 +7,10 @@ for idx in {1..9}
 do
   cp -rf raft raft${idx}
   cd raft${idx}
-  go test -run 2A > 2A &
-  go test -run 2B > 2B &
-  go test -run 2C > 2C &
+  go test > 2.log &
+#  go test -run 2A > 2A &
+#  go test -run 2B > 2B &
+#  go test -run 2C > 2C &
 #  go test -run 2D > 2D &
 #  go test -run TestBackup2B > 2B &
 #  go test -run TestFigure8Unreliable2C > 2C &
@@ -18,9 +19,10 @@ done
 
 cp -rf raft raft10
 cd raft10
-go test -run 2A > 2A
-go test -run 2B > 2B
-go test -run 2C > 2C
+go test > 2.log
+#go test -run 2A > 2A
+#go test -run 2B > 2B
+#go test -run 2C > 2C
 #go test -run 2D > 2D
 #go test -run TestBackup2B > 2B
 #go test -run TestFigure8Unreliable2C > 2C
