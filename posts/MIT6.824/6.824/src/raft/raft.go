@@ -843,6 +843,25 @@ func (rf *Raft) apply() {
 			}
 			rf.Unlock("apply")
 
+			// 对 internalApplyList 按日志索引排序
+			for i := 0; i <= len(internalApplyList)-1; i++ {
+				for j := i; j <= len(internalApplyList)-1; j++ {
+					x := internalApplyList[i].CommandIndex
+					if internalApplyList[i].SnapshotValid {
+						x = internalApplyList[i].SnapshotIndex
+					}
+					y := internalApplyList[j].CommandIndex
+					if internalApplyList[j].SnapshotValid {
+						y = internalApplyList[j].SnapshotIndex
+					}
+					if x > y {
+						t := internalApplyList[i]
+						internalApplyList[i] = internalApplyList[j]
+						internalApplyList[j] = t
+					}
+				}
+			}
+
 			for _, applyMsg := range internalApplyList {
 				if (applyMsg.CommandValid && applyMsg.CommandIndex > rf.lastApplied) ||
 					(applyMsg.SnapshotValid && applyMsg.SnapshotIndex > rf.lastApplied) {
