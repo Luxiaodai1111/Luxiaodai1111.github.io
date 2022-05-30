@@ -348,13 +348,15 @@ func (rf *Raft) replicate(peer int, syncCommit bool) {
 		LeaderCommit: rf.commitIndex,
 		Entries:      nil,
 	}
+
+	if rf.nextIndex[peer] <= rf.logs[0].CommandIndex {
+		go rf.sendSnap(peer)
+		rf.Unlock("replicate")
+		return
+	}
+
 	lastLog := rf.getLastLog()
 	if !syncCommit {
-		if rf.nextIndex[peer] <= rf.logs[0].CommandIndex {
-			go rf.sendSnap(peer)
-			rf.Unlock("replicate")
-			return
-		}
 		if rf.nextIndex[peer] < lastLog.CommandIndex+1 {
 			// 存在待提交日志
 			rf.DPrintf("peer %d's nextIndex is %d", peer, rf.nextIndex[peer])
@@ -894,10 +896,24 @@ func (rf *Raft) commitLog() {
 	return
 }
 
+func (rf *Raft) heartbeat() {
+	for rf.killed() == false {
+		time.Sleep(rf.HeartbeatTimeout())
+		rf.Lock("heartbeatTimer")
+		if rf.role == Leader {
+			// 更新提交索引
+			rf.commitLog()
+			// Leader 定期发送心跳
+			rf.broadcast(false)
+			rf.ResetElectionTimeout()
+		}
+		rf.Unlock("heartbeatTimer")
+	}
+}
+
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
-func (rf *Raft) ticker() {
-	heartbeatTicker := time.NewTicker(rf.HeartbeatTimeout())
+func (rf *Raft) election() {
 	rf.ResetElectionTimeout()
 	for rf.killed() == false {
 		select {
@@ -918,19 +934,9 @@ func (rf *Raft) ticker() {
 			rf.DPrintf("====== election timeout ======")
 			rf.role = Candidate
 			rf.currentTerm += 1
-			rf.startElection()
 			rf.ResetElectionTimeout()
+			rf.startElection()
 			rf.Unlock("electionTimer")
-		case <-heartbeatTicker.C:
-			rf.Lock("heartbeatTimer")
-			if rf.role == Leader {
-				// 更新提交索引
-				rf.commitLog()
-				// Leader 定期发送心跳
-				rf.broadcast(false)
-				rf.ResetElectionTimeout()
-			}
-			rf.Unlock("heartbeatTimer")
 		}
 	}
 }
@@ -972,7 +978,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
-	go rf.ticker()
+	go rf.election()
+	go rf.heartbeat()
 
 	go rf.apply()
 

@@ -63,3 +63,375 @@ ok      6.824/raft      293.456s
 
 # 设计思路
 
+## 结构体设计
+
+根据论文要求，增加了 InstallSnapshotArgs RPC 消息，和论文不一样的是我没有使用 LastIncludeIndex 和 LastIncludeTerm，而是使用了 LastSnapLog 把最后一条日志记录下来了，其实记录的东西是一样的，只是方便我编写代码而已。
+
+```go
+type InstallSnapshotArgs struct {
+   Term     int // leader 任期
+   LeaderId int // 用来 follower 把客户端请求重定向到 leader
+   //LastIncludeIndex int      // 快照中包含的最后日志条目的索引值
+   //LastIncludeTerm  int      // 快照中包含的最后日志条目的任期号
+   Offset      int      //分块在快照中的字节偏移量
+   Data        []byte   // 从偏移量开始的快照分块的原始字节
+   Done        bool     // 如果这是最后一个分块则为 true
+   LastSnapLog LogEntry // 快照最后一条日志内容
+}
+
+type InstallSnapshotReply struct {
+   Term int // 当前任期
+}
+```
+
+
+
+## 快照
+
+这里我在快照的时候在 logs 里保留的快照的最后一条日志，这样就不用单独记录元数据了，也方便代码编写。
+
+```go
+func (rf *Raft) Snapshot(index int, snapshot []byte) {
+   // Your code here (2D).
+   rf.DPrintf("Snapshot %d", index)
+
+   rf.Lock("Snapshot")
+   defer rf.Unlock("Snapshot")
+
+   if index > rf.commitIndex {
+      // 不能快照未提交的日志
+      rf.DPrintf("[ERROR]: index %d > commitIndex %d", index, rf.commitIndex)
+      return
+   }
+   if index <= rf.logs[0].CommandIndex {
+      // 不能回退快照日志
+      rf.DPrintf("[ERROR]: index %d <= rf.logs[0].CommandIndex %d", index, rf.logs[0].CommandIndex)
+      return
+   }
+
+   // 避免切片内存泄露
+   // 保留最后一条日志用来记录 Last Snap Log
+   logIndex := index - rf.logs[0].CommandIndex
+   rf.logs = append([]LogEntry{}, rf.logs[logIndex:]...)
+
+   rf.SaveStateAndSnapshot(snapshot)
+}
+
+func (rf *Raft) SaveStateAndSnapshot(snapshot []byte) {
+	rf.DPrintf("SaveStateAndSnapshot")
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if e.Encode(rf.currentTerm) != nil ||
+		e.Encode(rf.votedFor) != nil ||
+		e.Encode(rf.logs) != nil {
+		rf.DPrintf("------ persist encode error ------")
+	}
+	state := w.Bytes()
+
+	rf.persister.SaveStateAndSnapshot(state, snapshot)
+}
+```
+
+
+
+## 追加日志
+
+追加日志和之前不同的就是如果要发送的日志在快照里，那么就需要发送快照。
+
+```go
+func (rf *Raft) replicate(peer int, syncCommit bool) {
+   rf.Lock("replicate")
+   if rf.role != Leader {
+      rf.Unlock("replicate")
+      rf.DPrintf("now is not leader, cancel send append entries")
+      return
+   }
+   request := &AppendEntriesArgs{
+      Term:         rf.currentTerm,
+      LeaderId:     rf.me,
+      LeaderCommit: rf.commitIndex,
+      Entries:      nil,
+   }
+
+   if rf.nextIndex[peer] <= rf.logs[0].CommandIndex {
+      go rf.sendSnap(peer)
+      rf.Unlock("replicate")
+      return
+   }
+
+   lastLog := rf.getLastLog()
+   if !syncCommit {
+      if rf.nextIndex[peer] < lastLog.CommandIndex+1 {
+         // 存在待提交日志
+         rf.DPrintf("peer %d's nextIndex is %d", peer, rf.nextIndex[peer])
+         request.Entries = rf.logs[rf.index(rf.nextIndex[peer]):]
+      }
+   }
+
+   // 根据是否携带日志来填充参数
+   if len(request.Entries) > 0 {
+      prevLog := rf.log(request.Entries[0].CommandIndex - 1)
+      request.PrevLogIndex = prevLog.CommandIndex
+      request.PrevLogTerm = prevLog.Term
+      rf.DPrintf("send log %d-%d to %d",
+         request.Entries[0].CommandIndex, request.Entries[len(request.Entries)-1].CommandIndex, peer)
+   } else {
+      request.PrevLogIndex = rf.nextIndex[peer] - 1
+      request.PrevLogTerm = rf.log(rf.nextIndex[peer] - 1).Term
+      rf.DPrintf("send heartbeat %+v to %d", request, peer)
+   }
+   rf.Unlock("replicate")
+
+   response := new(AppendEntriesReply)
+   if rf.sendAppendEntries(peer, request, response) {
+      rf.DPrintf("receive AppendEntriesReply from %d, response is %+v", peer, response)
+      rf.Lock("recvAppendEntries")
+      defer rf.Unlock("recvAppendEntries")
+
+      // 过期轮次的回复直接丢弃
+      if request.Term < rf.currentTerm {
+         return
+      }
+
+      rf.checkTerm(peer, response.Term)
+
+      if rf.role != Leader {
+         rf.DPrintf("now is not leader")
+         return
+      }
+
+      if response.Success {
+         if request.Entries == nil || len(request.Entries) == 0 {
+            return
+         }
+         lastEntryIndex := request.Entries[len(request.Entries)-1].CommandIndex
+         if lastEntryIndex > rf.matchIndex[peer] {
+            rf.matchIndex[peer] = lastEntryIndex
+            rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+            rf.DPrintf("peer %d's matchIndex is %d", peer, rf.matchIndex[peer])
+         }
+      } else {
+         var nextIndex int
+         oldNextIndex := rf.nextIndex[peer]
+         lastLog = rf.getLastLog()
+
+         // 检查冲突日志
+         if rf.logs[0].CommandIndex <= response.ConflictIndex && response.ConflictIndex <= lastLog.CommandIndex &&
+            rf.log(response.ConflictIndex).Term == response.ConflictTerm {
+            // 如果日志匹配的话，下次就从这条日志发起
+            nextIndex = response.ConflictIndex
+         } else if response.ConflictIndex < rf.logs[0].CommandIndex {
+            // 冲突索引在本地快照中，那么直接发送快照
+            nextIndex = response.ConflictIndex
+         } else {
+            // 如果冲突，则从冲突日志的上一条发起
+            if response.ConflictIndex <= oldNextIndex {
+               nextIndex = response.ConflictIndex - 1
+            } else {
+               nextIndex = oldNextIndex - 1
+            }
+         }
+         // 冲突索引只能往回退
+         if nextIndex < oldNextIndex {
+            rf.nextIndex[peer] = nextIndex
+         }
+         // 索引要大于 matchIndex
+         if rf.matchIndex[peer] >= nextIndex {
+            rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+         }
+         // 有冲突要立马再次发送日志去快速同步
+         if rf.nextIndex[peer] < oldNextIndex {
+            rf.DPrintf("====== Fast Synchronization %d ======", peer)
+            go rf.replicate(peer, false)
+         }
+
+         rf.DPrintf("peer %d's nextIndex is %d", peer, rf.nextIndex[peer])
+      }
+   } else {
+      rf.DPrintf("send append entries RPC to %d failed", peer)
+   }
+}
+```
+
+对于追加日志的处理主要就是匹配日志时，如果在快照中，那么一定就是匹配的，因为快照都是已提交的日志。
+
+```go
+func (rf *Raft) checkLogMatch(PrevLogIndex int, PrevLogTerm int) bool {
+   lastLog := rf.getLastLog()
+   if rf.logs[0].CommandIndex <= PrevLogIndex && PrevLogIndex <= lastLog.CommandIndex &&
+      rf.log(PrevLogIndex).Term == PrevLogTerm {
+      // 日志在 logs 中存在且匹配
+      return true
+   } else if PrevLogIndex <= rf.logs[0].CommandIndex {
+      // 日志在快照中，一定匹配
+      return true
+   }
+
+   return false
+}
+```
+
+
+
+## 发送快照
+
+这里是根据实验建议没有将快照分片，这样处理比较简单。
+
+```go
+func (rf *Raft) sendSnap(peer int) {
+   rf.Lock("sendSnap")
+   if rf.role != Leader {
+      rf.Unlock("sendSnap")
+      rf.DPrintf("now is not leader, cancel send snap")
+      return
+   }
+
+   request := &InstallSnapshotArgs{
+      Term:        rf.currentTerm,
+      LeaderId:    rf.me,
+      Offset:      0,
+      Data:        rf.persister.ReadSnapshot(),
+      Done:        true, // 不分片，一次传输
+      LastSnapLog: rf.logs[0],
+   }
+   rf.Unlock("sendSnap")
+
+   rf.DPrintf("====== sendSnap %d to %d ======", request.LastSnapLog.CommandIndex, peer)
+   response := new(InstallSnapshotReply)
+   if rf.sendInstallSnapshot(peer, request, response) {
+      rf.DPrintf("receive InstallSnapshotReply from %d, response is %+v", peer, response)
+      rf.Lock("recvInstallSnapshotReply")
+      defer rf.Unlock("recvInstallSnapshotReply")
+
+      // 过期轮次的回复直接丢弃
+      if request.Term < rf.currentTerm {
+         return
+      }
+
+      rf.checkTerm(peer, response.Term)
+
+      if rf.role != Leader {
+         rf.DPrintf("now is not leader")
+         return
+      }
+
+      rf.matchIndex[peer] = request.LastSnapLog.CommandIndex
+      rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+      rf.DPrintf("peer %d's matchIndex is %d", peer, rf.matchIndex[peer])
+
+      go rf.replicate(peer, false)
+   }
+
+}
+```
+
+如果快照比本地快照新，那就无脑追加好了，这里为了处理状态机更新，我把快照的应用放到了 rf.internalApplyList 里，然后在 apply 协程里统一处理。
+
+```go
+func (rf *Raft) InstallSnapshot(request *InstallSnapshotArgs, response *InstallSnapshotReply) {
+   rf.Lock("InstallSnapshot")
+   defer rf.Unlock("InstallSnapshot")
+   response.Term = rf.currentTerm
+   if request.Term < rf.currentTerm {
+      rf.DPrintf("refuse InstallSnapshot from %d", request.LeaderId)
+      return
+   }
+
+   rf.checkTerm(request.LeaderId, request.Term)
+
+   // 本地快照更新则忽略此快照
+   if request.LastSnapLog.CommandIndex <= rf.logs[0].CommandIndex {
+      rf.DPrintf("local snap is more newer")
+      return
+   }
+
+   rf.SaveStateAndSnapshot(request.Data)
+
+   findMatchLog := false
+   for idx := 0; idx < len(rf.logs); idx++ {
+      if rf.logs[idx].CommandIndex == request.LastSnapLog.CommandIndex &&
+         rf.logs[idx].Term == request.LastSnapLog.Term {
+         rf.logs = append([]LogEntry{}, rf.logs[idx:]...)
+         rf.DPrintf("update logs")
+         rf.printLog()
+         findMatchLog = true
+         break
+      }
+   }
+   if !findMatchLog {
+      rf.logs = append([]LogEntry{}, request.LastSnapLog)
+      rf.DPrintf("update logs")
+      rf.printLog()
+   }
+
+   rf.internalApplyList = append(rf.internalApplyList, ApplyMsg{
+      CommandValid:  false,
+      Command:       nil,
+      CommandIndex:  0,
+      SnapshotValid: true,
+      Snapshot:      request.Data,
+      SnapshotTerm:  request.LastSnapLog.Term,
+      SnapshotIndex: request.LastSnapLog.CommandIndex,
+   })
+}
+```
+
+
+
+## 更新状态机
+
+这里增加了对快照的 apply。
+
+```go
+func (rf *Raft) apply() {
+   for rf.killed() == false {
+      if rf.lastApplied < rf.commitIndex {
+         // 先把要提交的日志整合出来，避免占用锁
+         rf.Lock("apply")
+         internalApplyList := make([]ApplyMsg, 0)
+         if len(rf.internalApplyList) > 0 {
+            // 取出要 apply 的快照
+            internalApplyList = append(internalApplyList, rf.internalApplyList...)
+            // 清空队列
+            rf.internalApplyList = make([]ApplyMsg, 0)
+         }
+         if rf.lastApplied >= rf.logs[0].CommandIndex {
+            for idx := rf.lastApplied + 1; idx <= rf.commitIndex; idx++ {
+               internalApplyList = append(internalApplyList, ApplyMsg{
+                  CommandValid: true,
+                  Command:      rf.log(idx).Command,
+                  CommandIndex: rf.log(idx).CommandIndex,
+               })
+            }
+         }
+         rf.Unlock("apply")
+
+         for _, applyMsg := range internalApplyList {
+            if (applyMsg.CommandValid && applyMsg.CommandIndex > rf.lastApplied) ||
+               (applyMsg.SnapshotValid && applyMsg.SnapshotIndex > rf.lastApplied) {
+               rf.applyCh <- applyMsg
+               if applyMsg.SnapshotValid {
+                  rf.DPrintf("====== apply snap, committed index: %d ======", applyMsg.SnapshotIndex)
+                  rf.lastApplied = applyMsg.SnapshotIndex
+               } else {
+                  rf.DPrintf("====== apply committed log %d ======", applyMsg.CommandIndex)
+                  rf.lastApplied = applyMsg.CommandIndex
+               }
+            }
+         }
+      }
+   }
+}
+```
+
+
+
+## 测试
+
+Lab 2 整个实验还是蛮有难度的，虽然调试起来累心，但通过之后浑身舒畅~~
+
+```bash
+
+```
+
+​	
