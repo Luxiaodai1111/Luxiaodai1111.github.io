@@ -329,50 +329,50 @@ func (rf *Raft) sendSnap(peer int) {
 
 ```go
 func (rf *Raft) InstallSnapshot(request *InstallSnapshotArgs, response *InstallSnapshotReply) {
-   rf.Lock("InstallSnapshot")
-   defer rf.Unlock("InstallSnapshot")
-   response.Term = rf.currentTerm
-   if request.Term < rf.currentTerm {
-      rf.DPrintf("refuse InstallSnapshot from %d", request.LeaderId)
-      return
-   }
+	rf.Lock("InstallSnapshot")
+	defer rf.Unlock("InstallSnapshot")
+	response.Term = rf.currentTerm
+	if request.Term < rf.currentTerm {
+		rf.DPrintf("refuse InstallSnapshot from %d", request.LeaderId)
+		return
+	}
 
-   rf.checkTerm(request.LeaderId, request.Term)
+	rf.checkTerm(request.LeaderId, request.Term)
 
-   // 本地快照更新则忽略此快照
-   if request.LastSnapLog.CommandIndex <= rf.logs[0].CommandIndex {
-      rf.DPrintf("local snap is more newer")
-      return
-   }
+	// 本地快照更新则忽略此快照
+	if request.LastSnapLog.CommandIndex <= rf.logs[0].CommandIndex {
+		rf.DPrintf("local snap is more newer")
+		return
+	}
 
-   rf.SaveStateAndSnapshot(request.Data)
+	findMatchLog := false
+	for idx := 0; idx < len(rf.logs); idx++ {
+		if rf.logs[idx].CommandIndex == request.LastSnapLog.CommandIndex &&
+			rf.logs[idx].Term == request.LastSnapLog.Term {
+			rf.logs = append([]LogEntry{}, rf.logs[idx:]...)
+			rf.DPrintf("update logs")
+			rf.printLog()
+			findMatchLog = true
+			break
+		}
+	}
+	if !findMatchLog {
+		rf.logs = append([]LogEntry{}, request.LastSnapLog)
+		rf.DPrintf("update logs")
+		rf.printLog()
+	}
 
-   findMatchLog := false
-   for idx := 0; idx < len(rf.logs); idx++ {
-      if rf.logs[idx].CommandIndex == request.LastSnapLog.CommandIndex &&
-         rf.logs[idx].Term == request.LastSnapLog.Term {
-         rf.logs = append([]LogEntry{}, rf.logs[idx:]...)
-         rf.DPrintf("update logs")
-         rf.printLog()
-         findMatchLog = true
-         break
-      }
-   }
-   if !findMatchLog {
-      rf.logs = append([]LogEntry{}, request.LastSnapLog)
-      rf.DPrintf("update logs")
-      rf.printLog()
-   }
+	rf.SaveStateAndSnapshot(request.Data)
 
-   rf.internalApplyList = append(rf.internalApplyList, ApplyMsg{
-      CommandValid:  false,
-      Command:       nil,
-      CommandIndex:  0,
-      SnapshotValid: true,
-      Snapshot:      request.Data,
-      SnapshotTerm:  request.LastSnapLog.Term,
-      SnapshotIndex: request.LastSnapLog.CommandIndex,
-   })
+	rf.internalApplyList = append(rf.internalApplyList, ApplyMsg{
+		CommandValid:  false,
+		Command:       nil,
+		CommandIndex:  0,
+		SnapshotValid: true,
+		Snapshot:      request.Data,
+		SnapshotTerm:  request.LastSnapLog.Term,
+		SnapshotIndex: request.LastSnapLog.CommandIndex,
+	})
 }
 ```
 
@@ -384,43 +384,62 @@ func (rf *Raft) InstallSnapshot(request *InstallSnapshotArgs, response *InstallS
 
 ```go
 func (rf *Raft) apply() {
-   for rf.killed() == false {
-      if rf.lastApplied < rf.commitIndex {
-         // 先把要提交的日志整合出来，避免占用锁
-         rf.Lock("apply")
-         internalApplyList := make([]ApplyMsg, 0)
-         if len(rf.internalApplyList) > 0 {
-            // 取出要 apply 的快照
-            internalApplyList = append(internalApplyList, rf.internalApplyList...)
-            // 清空队列
-            rf.internalApplyList = make([]ApplyMsg, 0)
-         }
-         if rf.lastApplied >= rf.logs[0].CommandIndex {
-            for idx := rf.lastApplied + 1; idx <= rf.commitIndex; idx++ {
-               internalApplyList = append(internalApplyList, ApplyMsg{
-                  CommandValid: true,
-                  Command:      rf.log(idx).Command,
-                  CommandIndex: rf.log(idx).CommandIndex,
-               })
-            }
-         }
-         rf.Unlock("apply")
+	for rf.killed() == false {
+		if rf.lastApplied < rf.commitIndex {
+			// 先把要提交的日志整合出来，避免占用锁
+			rf.Lock("apply")
+			internalApplyList := make([]ApplyMsg, 0)
+			if len(rf.internalApplyList) > 0 {
+				// 取出要 apply 的快照
+				internalApplyList = append(internalApplyList, rf.internalApplyList...)
+				// 清空队列
+				rf.internalApplyList = make([]ApplyMsg, 0)
+			}
+			if rf.lastApplied >= rf.logs[0].CommandIndex {
+				for idx := rf.lastApplied + 1; idx <= rf.commitIndex; idx++ {
+					internalApplyList = append(internalApplyList, ApplyMsg{
+						CommandValid: true,
+						Command:      rf.log(idx).Command,
+						CommandIndex: rf.log(idx).CommandIndex,
+					})
+				}
+			}
+			rf.Unlock("apply")
 
-         for _, applyMsg := range internalApplyList {
-            if (applyMsg.CommandValid && applyMsg.CommandIndex > rf.lastApplied) ||
-               (applyMsg.SnapshotValid && applyMsg.SnapshotIndex > rf.lastApplied) {
-               rf.applyCh <- applyMsg
-               if applyMsg.SnapshotValid {
-                  rf.DPrintf("====== apply snap, committed index: %d ======", applyMsg.SnapshotIndex)
-                  rf.lastApplied = applyMsg.SnapshotIndex
-               } else {
-                  rf.DPrintf("====== apply committed log %d ======", applyMsg.CommandIndex)
-                  rf.lastApplied = applyMsg.CommandIndex
-               }
-            }
-         }
-      }
-   }
+			// 对 internalApplyList 按日志索引排序
+			for i := 0; i <= len(internalApplyList)-1; i++ {
+				for j := i; j <= len(internalApplyList)-1; j++ {
+					x := internalApplyList[i].CommandIndex
+					if internalApplyList[i].SnapshotValid {
+						x = internalApplyList[i].SnapshotIndex
+					}
+					y := internalApplyList[j].CommandIndex
+					if internalApplyList[j].SnapshotValid {
+						y = internalApplyList[j].SnapshotIndex
+					}
+					if x > y {
+						t := internalApplyList[i]
+						internalApplyList[i] = internalApplyList[j]
+						internalApplyList[j] = t
+					}
+				}
+			}
+
+			for _, applyMsg := range internalApplyList {
+				if (applyMsg.CommandValid && applyMsg.CommandIndex > rf.lastApplied) ||
+					(applyMsg.SnapshotValid && applyMsg.SnapshotIndex > rf.lastApplied) {
+					rf.applyCh <- applyMsg
+					if applyMsg.SnapshotValid {
+						rf.DPrintf("====== apply snap, committed index: %d ======", applyMsg.SnapshotIndex)
+						rf.lastApplied = applyMsg.SnapshotIndex
+					} else {
+						rf.DPrintf("====== apply committed log %d ======", applyMsg.CommandIndex)
+						rf.lastApplied = applyMsg.CommandIndex
+					}
+				}
+			}
+		}
+	}
 }
 ```
 

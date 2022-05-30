@@ -96,8 +96,6 @@ func (rf *Raft) InstallSnapshot(request *InstallSnapshotArgs, response *InstallS
 		return
 	}
 
-	rf.SaveStateAndSnapshot(request.Data)
-
 	findMatchLog := false
 	for idx := 0; idx < len(rf.logs); idx++ {
 		if rf.logs[idx].CommandIndex == request.LastSnapLog.CommandIndex &&
@@ -114,6 +112,8 @@ func (rf *Raft) InstallSnapshot(request *InstallSnapshotArgs, response *InstallS
 		rf.DPrintf("update logs")
 		rf.printLog()
 	}
+
+	rf.SaveStateAndSnapshot(request.Data)
 
 	rf.internalApplyList = append(rf.internalApplyList, ApplyMsg{
 		CommandValid:  false,
