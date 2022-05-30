@@ -136,7 +136,7 @@ func (rf *Raft) SaveStateAndSnapshot(snapshot []byte) {
 
 ## 追加日志
 
-追加日志和之前不同的就是如果要发送的日志在快照里，那么就需要发送快照。
+追加日志和之前不同的就是如果要发送的日志在快照里，那么就需要发送快照，2B 如果理解了，其实加快照功能并不是很难，细心就行了。
 
 ```go
 func (rf *Raft) replicate(peer int, syncCommit bool) {
@@ -275,7 +275,7 @@ func (rf *Raft) checkLogMatch(PrevLogIndex int, PrevLogTerm int) bool {
 
 ## 发送快照
 
-这里是根据实验建议没有将快照分片，这样处理比较简单。
+这里根据实验建议没有将快照分片，这样处理比较简单。
 
 ```go
 func (rf *Raft) sendSnap(peer int) {
@@ -325,7 +325,7 @@ func (rf *Raft) sendSnap(peer int) {
 }
 ```
 
-如果快照比本地快照新，那就无脑追加好了，这里为了处理状态机更新，我把快照的应用放到了 rf.internalApplyList 里，然后在 apply 协程里统一处理。
+如果快照比本地快照新，那就无脑追加好了，这里为了处理状态机更新，我把快照的 apply 先放到了 rf.internalApplyList 队列里，然后在 apply 协程统一处理。
 
 ```go
 func (rf *Raft) InstallSnapshot(request *InstallSnapshotArgs, response *InstallSnapshotReply) {
@@ -428,10 +428,62 @@ func (rf *Raft) apply() {
 
 ## 测试
 
-Lab 2 整个实验还是蛮有难度的，虽然调试起来累心，但通过之后浑身舒畅~~
+Lab 2 整个实验还是蛮有难度的，通过撒花🎉🎉
 
 ```bash
-
+[root@localhost raft]# go test
+Test (2A): initial election ...
+  ... Passed --   3.5  3   57   16678    0
+Test (2A): election after network failure ...
+  ... Passed --   6.1  3  149   32390    0
+Test (2A): multiple elections ...
+  ... Passed --   8.1  7  759  164401    0
+Test (2B): basic agreement ...
+  ... Passed --   1.3  3   15    4484    3
+Test (2B): RPC byte count ...
+  ... Passed --   3.0  3   47  114514   11
+Test (2B): agreement after follower reconnects ...
+  ... Passed --   6.2  3  115   32740    8
+Test (2B): no agreement if too many followers disconnect ...
+  ... Passed --   4.0  5  163   38985    3
+Test (2B): concurrent Start()s ...
+  ... Passed --   1.1  3    9    2730    6
+Test (2B): rejoin of partitioned leader ...
+  ... Passed --   4.7  3  144   35788    4
+Test (2B): leader backs up quickly over incorrect follower logs ...
+  ... Passed --  27.8  5 2109 1831286  102
+Test (2B): RPC counts aren't too high ...
+  ... Passed --   2.6  3   41   12602   12
+Test (2C): basic persistence ...
+  ... Passed --   5.4  3   98   24771    6
+Test (2C): more persistence ...
+  ... Passed --  19.6  5 1020  233357   16
+Test (2C): partitioned leader and one follower crash, leader restarts ...
+  ... Passed --   2.2  3   42   10499    4
+Test (2C): Figure 8 ...
+  ... Passed --  33.4  5  839  169827   19
+Test (2C): unreliable agreement ...
+  ... Passed --   8.6  5  328  114636  246
+Test (2C): Figure 8 (unreliable) ...
+  ... Passed --  49.9  5 4204 6204806  312
+Test (2C): churn ...
+  ... Passed --  16.4  5  714  471606  175
+Test (2C): unreliable churn ...
+  ... Passed --  16.5  5  635  228281  172
+Test (2D): snapshots basic ...
+  ... Passed --   7.4  3  139   53806  251
+Test (2D): install snapshots (disconnect) ...
+  ... Passed --  49.6  3 1123  414897  326
+Test (2D): install snapshots (disconnect+unreliable) ...
+  ... Passed --  75.1  3 1602  598199  358
+Test (2D): install snapshots (crash) ...
+  ... Passed --  39.1  3  803  322592  340
+Test (2D): install snapshots (unreliable+crash) ...
+  ... Passed --  44.8  3  889  335125  320
+Test (2D): crash and restart all servers ...
+  ... Passed --  13.1  3  250   70666   48
+PASS
+ok  	6.824/raft	449.825s
 ```
 
 ​	
