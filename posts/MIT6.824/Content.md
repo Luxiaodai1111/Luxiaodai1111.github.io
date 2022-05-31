@@ -63,6 +63,10 @@
 > ## [🧪 Lab 02：Part 2B / 2C](posts/MIT6.824/Lab/Lab02-Raft-part2B-C.md)
 >
 > ## [🧪 Lab 02：Part 2D](posts/MIT6.824/Lab/Lab02-Raft-part2D.md)
+>
+> 扩展学习：
+>
+> [📄 Raft 博士毕业论文翻译](posts/经典论文导读/raft博士论文翻译.md)
 
 ​	
 
