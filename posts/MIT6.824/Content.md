@@ -14,7 +14,7 @@
 
 > ## [🏷️ 课程简介](posts/MIT6.824/Lecture/lecture01-Introduction.md)
 >
-> ## [📄 MapReduce: Simplified Data Processing on Large Clusters](posts/MIT6.824/_paper/MapReduce.md)
+> ## [📄 MapReduce: Simplified Data Processing on Large Clusters](posts/经典论文导读/MapReduce.md)
 >
 > ## [🧪 Lab 01：MapReduce](posts/MIT6.824/Lab/Lab01-MapReduce.md)
 >
@@ -30,7 +30,7 @@
 
 > ## [🏷️ GFS 设计原理](posts/MIT6.824/Lecture/lecture03-GFS.md)
 >
-> ## [📄 The Google File System](posts/MIT6.824/_paper/GFS.md)
+> ## [📄 The Google File System](posts/经典论文导读/GFS.md)
 
 ​	
 
@@ -54,7 +54,7 @@
 >
 > ## [🏷️ Raft 02](posts/MIT6.824/Lecture/lecture07-Raft2.md)
 >
-> ## [📄 In Search of an Understandable Consensus Algorithm (Extended Version)](posts/MIT6.824/_paper/Raft-extended.md)
+> ## [📄 In Search of an Understandable Consensus Algorithm (Extended Version)](posts/经典论文导读/Raft-extended.md)
 >
 > ## [🧪 Lab 02：Raft](posts/MIT6.824/Lab/Lab02-Raft.md)
 >

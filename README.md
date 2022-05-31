@@ -98,4 +98,20 @@
 
 
 
+---
+
+# 📄 经典论文导读
+
+[📄 MapReduce: Simplified Data Processing on Large Clusters](posts/经典论文导读/MapReduce.md)
+
+[📄 The Google File System](posts/经典论文导读/GFS.md)
+
+[📄 In Search of an Understandable Consensus Algorithm (Extended Version)](posts/经典论文导读/Raft-extended.md)
+
+[📄 Finding a needle in Haystack: Facebook’s photo storage](posts/经典论文导读/Haystack.md)
+
+
+
+
+
 ​	
