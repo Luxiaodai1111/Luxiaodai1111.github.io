@@ -20,6 +20,7 @@ package raft
 import (
 	"6.824/labgob"
 	"bytes"
+	"context"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -167,7 +168,7 @@ func (rf *Raft) sendSnap(peer int) {
 		rf.nextIndex[peer] = rf.matchIndex[peer] + 1
 		rf.DPrintf("peer %d's matchIndex is %d", peer, rf.matchIndex[peer])
 
-		go rf.replicate(peer, false)
+		go rf.replicate(peer)
 	}
 
 }
@@ -335,7 +336,7 @@ func (rf *Raft) checkTerm(peer int, term int) {
 	}
 }
 
-func (rf *Raft) replicate(peer int, syncCommit bool) {
+func (rf *Raft) replicate(peer int) {
 	rf.Lock("replicate")
 	if rf.role != Leader {
 		rf.Unlock("replicate")
@@ -356,12 +357,10 @@ func (rf *Raft) replicate(peer int, syncCommit bool) {
 	}
 
 	lastLog := rf.getLastLog()
-	if !syncCommit {
-		if rf.nextIndex[peer] < lastLog.CommandIndex+1 {
-			// 存在待提交日志
-			rf.DPrintf("peer %d's nextIndex is %d", peer, rf.nextIndex[peer])
-			request.Entries = rf.logs[rf.index(rf.nextIndex[peer]):]
-		}
+	if rf.nextIndex[peer] < lastLog.CommandIndex+1 {
+		// 存在待提交日志
+		rf.DPrintf("peer %d's nextIndex is %d", peer, rf.nextIndex[peer])
+		request.Entries = rf.logs[rf.index(rf.nextIndex[peer]):]
 	}
 
 	// 根据是否携带日志来填充参数
@@ -438,23 +437,23 @@ func (rf *Raft) replicate(peer int, syncCommit bool) {
 			// 有冲突要立马再次发送日志去快速同步
 			if rf.nextIndex[peer] < oldNextIndex {
 				rf.DPrintf("====== Fast Synchronization %d ======", peer)
-				go rf.replicate(peer, false)
+				go rf.replicate(peer)
 			}
 
-			rf.DPrintf("peer %d's nextIndex is %d", peer, rf.nextIndex[peer])
+			rf.DPrintf("peer %d's nextIndex update to %d", peer, rf.nextIndex[peer])
 		}
 	} else {
 		rf.DPrintf("send append entries RPC to %d failed", peer)
 	}
 }
 
-func (rf *Raft) broadcast(syncCommit bool) {
+func (rf *Raft) broadcast() {
 	rf.plug = 0
 	for peer := range rf.peers {
 		if peer == rf.me {
 			continue
 		}
-		go rf.replicate(peer, syncCommit)
+		go rf.replicate(peer)
 	}
 
 	return
@@ -487,6 +486,8 @@ type Raft struct {
 	applyCh           chan ApplyMsg
 	internalApplyList []ApplyMsg // 内部 apply 队列
 	plug              int        // 心跳时间内积攒一定数目的日志再一起发送
+
+	cancel context.CancelFunc // 结束协程
 }
 
 const HeartbeatTimeoutBase = 100
@@ -653,8 +654,14 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply
 
 	rf.checkTerm(request.CandidateId, request.Term)
 
-	// 对端任期小或者本端已经投票过了，那么拒绝投票
-	if request.Term < rf.currentTerm || (request.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != request.CandidateId) {
+	// 对端任期小，拒绝投票
+	if request.Term < rf.currentTerm {
+		rf.DPrintf("currentTerm is more larger, refuse to vote for %d", request.CandidateId)
+		response.Term, response.VoteGranted = rf.currentTerm, false
+		return
+	}
+	// 本端已经投票过了，那么拒绝投票
+	if request.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != request.CandidateId {
 		rf.DPrintf("already vote for %d, refuse to vote for %d", rf.votedFor, request.CandidateId)
 		response.Term, response.VoteGranted = rf.currentTerm, false
 		return
@@ -738,8 +745,8 @@ func (rf *Raft) startElection() {
 							rf.nextIndex[i] = rf.getLastLog().CommandIndex + 1
 							rf.matchIndex[i] = 0
 						}
-						// 这里应该要提交一条空日志，但是 2B 测试通不过，所以改为发送最后一条日志来同步提交
-						rf.broadcast(true)
+						// 这里应该要提交一条空日志，但是 2B 测试通不过
+						rf.broadcast()
 					}
 				}
 			} else {
@@ -788,7 +795,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.plug += 1
 		if rf.plug >= PlugNumber {
 			rf.plug = 0
-			rf.broadcast(false)
+			rf.broadcast()
 		}
 	}
 
@@ -812,6 +819,7 @@ func (rf *Raft) Kill() {
 	rf.Lock("Kill")
 	defer rf.Unlock("Kill")
 	rf.persist()
+	rf.cancel()
 }
 
 func (rf *Raft) killed() bool {
@@ -820,7 +828,7 @@ func (rf *Raft) killed() bool {
 }
 
 // 更新状态机
-func (rf *Raft) apply() {
+func (rf *Raft) apply(ctx context.Context) {
 	for rf.killed() == false {
 		if rf.lastApplied < rf.commitIndex {
 			// 先把要提交的日志整合出来，避免占用锁
@@ -865,13 +873,17 @@ func (rf *Raft) apply() {
 			for _, applyMsg := range internalApplyList {
 				if (applyMsg.CommandValid && applyMsg.CommandIndex > rf.lastApplied) ||
 					(applyMsg.SnapshotValid && applyMsg.SnapshotIndex > rf.lastApplied) {
-					rf.applyCh <- applyMsg
-					if applyMsg.SnapshotValid {
-						rf.DPrintf("====== apply snap, committed index: %d ======", applyMsg.SnapshotIndex)
-						rf.lastApplied = applyMsg.SnapshotIndex
-					} else {
-						rf.DPrintf("====== apply committed log %d ======", applyMsg.CommandIndex)
-						rf.lastApplied = applyMsg.CommandIndex
+					select {
+					case rf.applyCh <- applyMsg:
+						if applyMsg.SnapshotValid {
+							rf.DPrintf("====== apply snap, committed index: %d ======", applyMsg.SnapshotIndex)
+							rf.lastApplied = applyMsg.SnapshotIndex
+						} else {
+							rf.DPrintf("====== apply committed log %d ======", applyMsg.CommandIndex)
+							rf.lastApplied = applyMsg.CommandIndex
+						}
+					case <-ctx.Done():
+						return
 					}
 				}
 			}
@@ -917,22 +929,22 @@ func (rf *Raft) commitLog() {
 
 func (rf *Raft) heartbeat() {
 	for rf.killed() == false {
-		time.Sleep(rf.HeartbeatTimeout())
 		rf.Lock("heartbeatTimer")
 		if rf.role == Leader {
 			// 更新提交索引
 			rf.commitLog()
 			// Leader 定期发送心跳
-			rf.broadcast(false)
+			rf.broadcast()
 			rf.ResetElectionTimeout()
 		}
 		rf.Unlock("heartbeatTimer")
+		time.Sleep(rf.HeartbeatTimeout())
 	}
 }
 
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
-func (rf *Raft) election() {
+func (rf *Raft) election(ctx context.Context) {
 	rf.ResetElectionTimeout()
 	for rf.killed() == false {
 		select {
@@ -956,6 +968,8 @@ func (rf *Raft) election() {
 			rf.ResetElectionTimeout()
 			rf.startElection()
 			rf.Unlock("electionTimer")
+		case <-ctx.Done():
+			return
 		}
 	}
 }
@@ -996,11 +1010,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	ctx, cancel := context.WithCancel(context.Background())
+	rf.cancel = cancel
+
 	// start ticker goroutine to start elections
-	go rf.election()
+	go rf.election(ctx)
 	go rf.heartbeat()
 
-	go rf.apply()
+	go rf.apply(ctx)
 
 	return rf
 }

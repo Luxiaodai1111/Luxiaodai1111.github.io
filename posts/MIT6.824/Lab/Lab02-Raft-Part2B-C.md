@@ -481,8 +481,14 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply
 
 	rf.checkTerm(request.CandidateId, request.Term)
 
-	// 对端任期小或者本端已经投票过了，那么拒绝投票
-	if request.Term < rf.currentTerm || (request.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != request.CandidateId) {
+	// 对端任期小，拒绝投票
+	if request.Term < rf.currentTerm {
+		rf.DPrintf("currentTerm is more larger, refuse to vote for %d", request.CandidateId)
+		response.Term, response.VoteGranted = rf.currentTerm, false
+		return
+	}
+	// 本端已经投票过了，那么拒绝投票
+	if request.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != request.CandidateId {
 		rf.DPrintf("already vote for %d, refuse to vote for %d", rf.votedFor, request.CandidateId)
 		response.Term, response.VoteGranted = rf.currentTerm, false
 		return

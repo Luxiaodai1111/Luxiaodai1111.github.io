@@ -140,116 +140,114 @@ func (rf *Raft) SaveStateAndSnapshot(snapshot []byte) {
 
 ```go
 func (rf *Raft) replicate(peer int, syncCommit bool) {
-   rf.Lock("replicate")
-   if rf.role != Leader {
-      rf.Unlock("replicate")
-      rf.DPrintf("now is not leader, cancel send append entries")
-      return
-   }
-   request := &AppendEntriesArgs{
-      Term:         rf.currentTerm,
-      LeaderId:     rf.me,
-      LeaderCommit: rf.commitIndex,
-      Entries:      nil,
-   }
+	rf.Lock("replicate")
+	if rf.role != Leader {
+		rf.Unlock("replicate")
+		rf.DPrintf("now is not leader, cancel send append entries")
+		return
+	}
+	request := &AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		LeaderCommit: rf.commitIndex,
+		Entries:      nil,
+	}
 
-   if rf.nextIndex[peer] <= rf.logs[0].CommandIndex {
-      go rf.sendSnap(peer)
-      rf.Unlock("replicate")
-      return
-   }
+	if rf.nextIndex[peer] <= rf.logs[0].CommandIndex {
+		go rf.sendSnap(peer)
+		rf.Unlock("replicate")
+		return
+	}
 
-   lastLog := rf.getLastLog()
-   if !syncCommit {
-      if rf.nextIndex[peer] < lastLog.CommandIndex+1 {
-         // 存在待提交日志
-         rf.DPrintf("peer %d's nextIndex is %d", peer, rf.nextIndex[peer])
-         request.Entries = rf.logs[rf.index(rf.nextIndex[peer]):]
-      }
-   }
+	lastLog := rf.getLastLog()
+	if rf.nextIndex[peer] < lastLog.CommandIndex+1 {
+		// 存在待提交日志
+		rf.DPrintf("peer %d's nextIndex is %d", peer, rf.nextIndex[peer])
+		request.Entries = rf.logs[rf.index(rf.nextIndex[peer]):]
+	}
 
-   // 根据是否携带日志来填充参数
-   if len(request.Entries) > 0 {
-      prevLog := rf.log(request.Entries[0].CommandIndex - 1)
-      request.PrevLogIndex = prevLog.CommandIndex
-      request.PrevLogTerm = prevLog.Term
-      rf.DPrintf("send log %d-%d to %d",
-         request.Entries[0].CommandIndex, request.Entries[len(request.Entries)-1].CommandIndex, peer)
-   } else {
-      request.PrevLogIndex = rf.nextIndex[peer] - 1
-      request.PrevLogTerm = rf.log(rf.nextIndex[peer] - 1).Term
-      rf.DPrintf("send heartbeat %+v to %d", request, peer)
-   }
-   rf.Unlock("replicate")
+	// 根据是否携带日志来填充参数
+	if len(request.Entries) > 0 {
+		prevLog := rf.log(request.Entries[0].CommandIndex - 1)
+		request.PrevLogIndex = prevLog.CommandIndex
+		request.PrevLogTerm = prevLog.Term
+		rf.DPrintf("send log %d-%d to %d",
+			request.Entries[0].CommandIndex, request.Entries[len(request.Entries)-1].CommandIndex, peer)
+	} else {
+		request.PrevLogIndex = rf.nextIndex[peer] - 1
+		request.PrevLogTerm = rf.log(rf.nextIndex[peer] - 1).Term
+		rf.DPrintf("send heartbeat %+v to %d", request, peer)
+	}
+	rf.Unlock("replicate")
 
-   response := new(AppendEntriesReply)
-   if rf.sendAppendEntries(peer, request, response) {
-      rf.DPrintf("receive AppendEntriesReply from %d, response is %+v", peer, response)
-      rf.Lock("recvAppendEntries")
-      defer rf.Unlock("recvAppendEntries")
+	response := new(AppendEntriesReply)
+	if rf.sendAppendEntries(peer, request, response) {
+		rf.DPrintf("receive AppendEntriesReply from %d, response is %+v", peer, response)
+		rf.Lock("recvAppendEntries")
+		defer rf.Unlock("recvAppendEntries")
 
-      // 过期轮次的回复直接丢弃
-      if request.Term < rf.currentTerm {
-         return
-      }
+		// 过期轮次的回复直接丢弃
+		if request.Term < rf.currentTerm {
+			return
+		}
 
-      rf.checkTerm(peer, response.Term)
+		rf.checkTerm(peer, response.Term)
 
-      if rf.role != Leader {
-         rf.DPrintf("now is not leader")
-         return
-      }
+		if rf.role != Leader {
+			rf.DPrintf("now is not leader")
+			return
+		}
 
-      if response.Success {
-         if request.Entries == nil || len(request.Entries) == 0 {
-            return
-         }
-         lastEntryIndex := request.Entries[len(request.Entries)-1].CommandIndex
-         if lastEntryIndex > rf.matchIndex[peer] {
-            rf.matchIndex[peer] = lastEntryIndex
-            rf.nextIndex[peer] = rf.matchIndex[peer] + 1
-            rf.DPrintf("peer %d's matchIndex is %d", peer, rf.matchIndex[peer])
-         }
-      } else {
-         var nextIndex int
-         oldNextIndex := rf.nextIndex[peer]
-         lastLog = rf.getLastLog()
+		if response.Success {
+			if request.Entries == nil || len(request.Entries) == 0 {
+				return
+			}
+			lastEntryIndex := request.Entries[len(request.Entries)-1].CommandIndex
+			if lastEntryIndex > rf.matchIndex[peer] {
+				rf.matchIndex[peer] = lastEntryIndex
+				rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+				rf.DPrintf("peer %d's matchIndex is %d", peer, rf.matchIndex[peer])
+			}
+		} else {
+			var nextIndex int
+			oldNextIndex := rf.nextIndex[peer]
+			lastLog = rf.getLastLog()
 
-         // 检查冲突日志
-         if rf.logs[0].CommandIndex <= response.ConflictIndex && response.ConflictIndex <= lastLog.CommandIndex &&
-            rf.log(response.ConflictIndex).Term == response.ConflictTerm {
-            // 如果日志匹配的话，下次就从这条日志发起
-            nextIndex = response.ConflictIndex
-         } else if response.ConflictIndex < rf.logs[0].CommandIndex {
-            // 冲突索引在本地快照中，那么直接发送快照
-            nextIndex = response.ConflictIndex
-         } else {
-            // 如果冲突，则从冲突日志的上一条发起
-            if response.ConflictIndex <= oldNextIndex {
-               nextIndex = response.ConflictIndex - 1
-            } else {
-               nextIndex = oldNextIndex - 1
-            }
-         }
-         // 冲突索引只能往回退
-         if nextIndex < oldNextIndex {
-            rf.nextIndex[peer] = nextIndex
-         }
-         // 索引要大于 matchIndex
-         if rf.matchIndex[peer] >= nextIndex {
-            rf.nextIndex[peer] = rf.matchIndex[peer] + 1
-         }
-         // 有冲突要立马再次发送日志去快速同步
-         if rf.nextIndex[peer] < oldNextIndex {
-            rf.DPrintf("====== Fast Synchronization %d ======", peer)
-            go rf.replicate(peer, false)
-         }
+			// 检查冲突日志
+			if rf.logs[0].CommandIndex <= response.ConflictIndex && response.ConflictIndex <= lastLog.CommandIndex &&
+				rf.log(response.ConflictIndex).Term == response.ConflictTerm {
+				// 如果日志匹配的话，下次就从这条日志发起
+				nextIndex = response.ConflictIndex
+			} else if response.ConflictIndex < rf.logs[0].CommandIndex {
+				// 冲突索引在本地快照中，那么直接发送快照
+				nextIndex = response.ConflictIndex
+			} else {
+				// 如果冲突，则从冲突日志的上一条发起
+				if response.ConflictIndex <= oldNextIndex {
+					nextIndex = response.ConflictIndex - 1
+				} else {
+					nextIndex = oldNextIndex - 1
+				}
+			}
+			// 冲突索引只能往回退
+			if nextIndex < oldNextIndex {
+				rf.nextIndex[peer] = nextIndex
+			}
+			// 索引要大于 matchIndex
+			if rf.matchIndex[peer] >= nextIndex {
+				rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+			}
+			// 有冲突要立马再次发送日志去快速同步
+			if rf.nextIndex[peer] < oldNextIndex {
+				rf.DPrintf("====== Fast Synchronization %d ======", peer)
+				go rf.replicate(peer, false)
+			}
 
-         rf.DPrintf("peer %d's nextIndex is %d", peer, rf.nextIndex[peer])
-      }
-   } else {
-      rf.DPrintf("send append entries RPC to %d failed", peer)
-   }
+			rf.DPrintf("peer %d's nextIndex update to %d", peer, rf.nextIndex[peer])
+		}
+	} else {
+		rf.DPrintf("send append entries RPC to %d failed", peer)
+	}
 }
 ```
 
@@ -452,57 +450,57 @@ Lab 2 整个实验还是蛮有难度的，通过撒花🎉🎉
 ```bash
 [root@localhost raft]# go test
 Test (2A): initial election ...
-  ... Passed --   3.5  3   57   16678    0
+  ... Passed --   3.5  3   63   18574    0
 Test (2A): election after network failure ...
-  ... Passed --   6.1  3  149   32390    0
+  ... Passed --   5.6  3  128   28560    0
 Test (2A): multiple elections ...
-  ... Passed --   8.1  7  759  164401    0
+  ... Passed --   6.7  7  497  109962    0
 Test (2B): basic agreement ...
-  ... Passed --   1.3  3   15    4484    3
+  ... Passed --   1.2  3   15    4484    3
 Test (2B): RPC byte count ...
-  ... Passed --   3.0  3   47  114514   11
+  ... Passed --   2.9  3   47  114514   11
 Test (2B): agreement after follower reconnects ...
-  ... Passed --   6.2  3  115   32740    8
+  ... Passed --   6.5  3  111   31242    8
 Test (2B): no agreement if too many followers disconnect ...
-  ... Passed --   4.0  5  163   38985    3
+  ... Passed --   4.0  5  167   40197    3
 Test (2B): concurrent Start()s ...
-  ... Passed --   1.1  3    9    2730    6
+  ... Passed --   1.2  3   15    4522    6
 Test (2B): rejoin of partitioned leader ...
-  ... Passed --   4.7  3  144   35788    4
+  ... Passed --   6.9  3  185   47952    4
 Test (2B): leader backs up quickly over incorrect follower logs ...
-  ... Passed --  27.8  5 2109 1831286  102
+  ... Passed --  25.5  5 2010 1779416  102
 Test (2B): RPC counts aren't too high ...
-  ... Passed --   2.6  3   41   12602   12
+  ... Passed --   2.9  3   47   14396   12
 Test (2C): basic persistence ...
-  ... Passed --   5.4  3   98   24771    6
+  ... Passed --   5.5  3   95   25688    6
 Test (2C): more persistence ...
-  ... Passed --  19.6  5 1020  233357   16
+  ... Passed --  22.1  5 1071  255128   17
 Test (2C): partitioned leader and one follower crash, leader restarts ...
-  ... Passed --   2.2  3   42   10499    4
+  ... Passed --   2.2  3   32    8839    4
 Test (2C): Figure 8 ...
-  ... Passed --  33.4  5  839  169827   19
+  ... Passed --  37.8  5  700  158969   25
 Test (2C): unreliable agreement ...
-  ... Passed --   8.6  5  328  114636  246
+  ... Passed --   9.5  5  352  120931  246
 Test (2C): Figure 8 (unreliable) ...
-  ... Passed --  49.9  5 4204 6204806  312
+  ... Passed --  46.8  5 3857 6684759  307
 Test (2C): churn ...
-  ... Passed --  16.4  5  714  471606  175
+  ... Passed --  16.5  5  505  215314  148
 Test (2C): unreliable churn ...
-  ... Passed --  16.5  5  635  228281  172
+  ... Passed --  16.5  5  602  218584  114
 Test (2D): snapshots basic ...
-  ... Passed --   7.4  3  139   53806  251
+  ... Passed --   7.4  3  137   51016  201
 Test (2D): install snapshots (disconnect) ...
-  ... Passed --  49.6  3 1123  414897  326
+  ... Passed --  51.9  3 1149  441962  320
 Test (2D): install snapshots (disconnect+unreliable) ...
-  ... Passed --  75.1  3 1602  598199  358
+  ... Passed --  60.9  3 1372  471372  299
 Test (2D): install snapshots (crash) ...
-  ... Passed --  39.1  3  803  322592  340
+  ... Passed --  40.7  3  728  315829  313
 Test (2D): install snapshots (unreliable+crash) ...
-  ... Passed --  44.8  3  889  335125  320
+  ... Passed --  45.5  3  813  323607  331
 Test (2D): crash and restart all servers ...
-  ... Passed --  13.1  3  250   70666   48
+  ... Passed --  17.8  3  304   94479   71
 PASS
-ok  	6.824/raft	449.825s
+ok  	6.824/raft	447.909s
 ```
 
 ​	
