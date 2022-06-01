@@ -110,7 +110,7 @@
 
 [📄 Finding a needle in Haystack: Facebook’s photo storage](posts/经典论文导读/Haystack.md)
 
-
+[📄 f4: Facebook’s Warm BLOB Storage System](posts/经典论文导读/f4.md)
 
 
 
