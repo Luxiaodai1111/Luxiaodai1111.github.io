@@ -484,4 +484,5 @@ LRC（Locally Repairable Codes），局部校验编码，其核心思想为：�
 - 操作系统导论 -- [美\] Remzi H. Arpaci-Dusseau / [美\] Andrea C. Arpaci-Dusseau 著
 - [基于柯西矩阵的Erasure Code技术详解](https://blog.51cto.com/alanwu/1410132)
 - [Erasure Coding in Windows Azure Storage](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/LRC12-cheng20webpage.pdf)
+- [A “Hitchhiker’s” Guide to Fast and Efficient Data Reconstruction in Erasure-coded Data Centers](https://www.cs.cmu.edu/~rvinayak/papers/Hitchhiker_SIGCOMM14.pdf)
 
