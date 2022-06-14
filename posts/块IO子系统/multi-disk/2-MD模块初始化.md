@@ -142,7 +142,7 @@ out:
 
 显然，在操作系统重启前，必须停止所有的 MD 设备。在模块加载时，register_reboot_notifier 函数注册了一个 notifier_block 类型的节点。这个函数是 notifier_chain_register 的封装，将这个节点按照优先级添加到系统重启通知链表 reboot_notifier_list 上。
 
-注册的节点结构 md_notifier 中，给出了节点优先级，以及一个回调函数。由于 MD 设备需要在底层磁盘之前停止，因此优先级数值设置得较大（为 INT_MAX）。回调函数 md_notify_reboot 仅仅是遍历所有的MD设备，停止之。
+注册的节点结构 md_notifier 中，给出了节点优先级，以及一个回调函数。由于 MD 设备需要在底层磁盘之前停止，因此优先级数值设置得较大（为 INT_MAX）。回调函数 md_notify_reboot 仅仅是遍历所有的 MD 设备，停止之。
 
 接下来，调用 register_sysctl_table 注册 MD 模块的系统控制表，主要用于设置用于控制同步速度的内核参数。
 
