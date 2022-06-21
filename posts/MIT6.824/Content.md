@@ -4,7 +4,7 @@
 
 [课程视频双语字幕](https://www.bilibili.com/video/BV1R7411t71W)
 
-[课程视频内容中文翻译](https://mit-public-courses-cn-translatio.gitbook.io/mit6-824/)
+[课程视频内容中文翻译（下面课程内容搬运于此，主要是个人习惯带空格的格式~）](https://mit-public-courses-cn-translatio.gitbook.io/mit6-824/)
 
 ​	
 
