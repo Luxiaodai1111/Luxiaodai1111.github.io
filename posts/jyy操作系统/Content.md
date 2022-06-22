@@ -1,4 +1,4 @@
-# 🌊 NJU OS: Operating System Design and Implementation
+# 🔮 NJU OS: Operating System Design and Implementation
 
 >[!NOTE]
 >
