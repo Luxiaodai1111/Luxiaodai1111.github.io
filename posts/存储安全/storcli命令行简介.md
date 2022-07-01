@@ -594,7 +594,78 @@ EID:Slt DID State DG       Size Intf  Med SED PI SeSz Model                   Sp
 
 
 
+---
 
+# 外部配置
+
+有时候比如磁盘被插拔了，这个时候盘上还保存着 RAID 的配置信息，此时只需要导入外部配置，即可导入磁盘而不需要重建。比如我拔出一块磁盘再插入，此时查看状态为 UBad。
+
+```bash
+[root@localhost ~]# storcli /c0/eall/sall show
+CLI Version = 007.1704.0000.0000 Jan 16, 2021
+Operating system = Linux 3.10.0-957.el7.x86_64
+Controller = 0
+Status = Failure
+Description = Show Drive Information Failed.
+
+Detailed Status :
+===============
+
+--------------------------------
+Drive      Status  ErrCd ErrMsg 
+--------------------------------
+/c0/e8/s1  Failure    46 -      
+/c0/e8/s2  Success     0 -      
+/c0/e8/s3  Success     0 -      
+...   
+--------------------------------
+
+
+
+Drive Information :
+=================
+
+----------------------------------------------------------------------------
+EID:Slt DID State DG     Size Intf Med SED PI SeSz Model            Sp Type 
+----------------------------------------------------------------------------
+8:1      18 UBad  -  9.094 TB SATA HDD N   N  512B WUS721010ALE6L4  U  -    
+8:2      20 Onln  0  9.094 TB SATA HDD N   N  512B WUS721010ALE6L4  U  -    
+8:3      22 Onln  1  9.094 TB SATA HDD N   N  512B WUS721010ALE6L4  U  -    
+...
+----------------------------------------------------------------------------
+
+EID=Enclosure Device ID|Slt=Slot No|DID=Device ID|DG=DriveGroup
+DHS=Dedicated Hot Spare|UGood=Unconfigured Good|GHS=Global Hotspare
+UBad=Unconfigured Bad|Sntze=Sanitize|Onln=Online|Offln=Offline|Intf=Interface
+Med=Media Type|SED=Self Encryptive Drive|PI=Protection Info
+SeSz=Sector Size|Sp=Spun|U=Up|D=Down|T=Transition|F=Foreign
+UGUnsp=UGood Unsupported|UGShld=UGood shielded|HSPShld=Hotspare shielded
+CFShld=Configured shielded|Cpybck=CopyBack|CBShld=Copyback Shielded
+UBUnsp=UBad Unsupported|Rbld=Rebuild
+
+```
+
+我们首先设置成 good 状态
+
+```bash
+[root@localhost ~]# storcli /c0/e8/s1 set good
+CLI Version = 007.1704.0000.0000 Jan 16, 2021
+Operating system = Linux 3.10.0-957.el7.x86_64
+Controller = 0
+Status = Success
+Description = Set Drive Good Succeeded.
+```
+
+然后再导入所有外部配置，也可以先用 `storcli /c0/fall show` 命令查看外部配置信息，然后导入某个具体的外部配置。
+
+```bash
+[root@localhost ~]# storcli /c0/fall import
+CLI Version = 007.1704.0000.0000 Jan 16, 2021
+Operating system = Linux 3.10.0-957.el7.x86_64
+Controller = 0
+Status = Success
+Description = Successfully imported foreign configuration
+```
 
 
 
