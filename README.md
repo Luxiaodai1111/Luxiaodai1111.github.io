@@ -80,6 +80,10 @@
 >
 > 麻省理工分布式课程，这门课每节课都会精读一篇分布式系统领域的经典论文，并由此传授分布式系统设计与实现的重要原则和关键技术。同时其课程 Project 也是以其难度之大而闻名遐迩，4 个编程作业循序渐进带你实现一个基于 Raft 共识算法的 KV-store 框架，让你在痛苦的 debug 中体会并行与分布式带来的随机性和复杂性。
 
+>   ## [☢️ MIT 6.S081](posts/MIT6.S081/Content.md)
+>
+>   麻省理工学院大名鼎鼎的 PDOS 实验室开设的面向 MIT 本科生的操作系统课程。前身是 MIT 著名的课程 6.828，MIT 的几位教授为了这门课曾专门开发了一个基于 x86 的教学用操作系统 JOS，被众多名校作为自己的操统课程实验。但随着 RISC-V 的横空出世，这几位教授又基于 RISC-V 开发了一个新的教学用操作系统 xv6，并开设了 MIT6.S081 这门课。由于 RISC-V 轻便易学的特点，学生不需要像此前 JOS 一样纠结于众多 x86 “特有的” 为了兼容而遗留下来的复杂机制，而可以专注于操作系统层面的开发。
+
 >   ## [☁️ MinIO](posts/MinIO/Content.md)
 >
 >   MinIO offers high-performance, S3 compatible object storage. Native to Kubernetes, MinIO is the only object storage suite available on every public cloud, every Kubernetes distribution, the private cloud and the edge. MinIO is software-defined and is 100% open source under GNU AGPL v3.

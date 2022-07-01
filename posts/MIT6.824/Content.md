@@ -1,4 +1,4 @@
-# 🌊 MIT 6.824
+# 🌊 MIT 6.824：Distributed System
 
 [课程安排](https://pdos.csail.mit.edu/6.824/schedule.html)
 
