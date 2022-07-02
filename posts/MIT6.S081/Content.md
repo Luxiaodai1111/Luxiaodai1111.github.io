@@ -19,7 +19,7 @@ xv6 补充资源：
 
 ---
 
->   ## Lab 01: TODO
+>   ## [Lab 01: Unix 工具集](posts/MIT6.S081/lab01.md)
 >
 >   [Lab util: Unix utilities](https://pdos.csail.mit.edu/6.828/2021/labs/util.html)
 
