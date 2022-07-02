@@ -378,6 +378,50 @@ parent receive: C
 
 # primes
 
+# 实验目标
+
+目标：利用 pipe 和 fork 来统计素数，由于 xv6 文件描述符数目有限，统计 35 以内即可。
+
+>[!NOTE]
+>
+>-   注意关闭一个进程不需要的文件描述符，因为否则你的程序会在第一个进程达到 35 之前耗尽 xv6 的资源
+>-   一旦第一个进程达到 35，它应该等待，直到整个管道终止，包括所有子进程、孙进程等等。因此，主 prime 进程应该只在所有输出都已打印并且所有其他 prime 进程都已退出之后才退出
+>-   当管道的写端关闭时，read返回零
+>-   最简单的方法是直接将 32 位（4 字节）int 写入管道，而不是使用格式化的 ASCII I/O
+>-   You should create the processes in the pipeline only as they are needed.
+>-   Add the program to `UPROGS` in Makefile.
+
+实现结果应该如下：
+
+```bash
+$ make qemu
+...
+init: starting sh
+$ primes
+prime 2
+prime 3
+prime 5
+prime 7
+prime 11
+prime 13
+prime 17
+prime 19
+prime 23
+prime 29
+prime 31
+$
+```
+
+
+
+## 实现
+
+
+
+
+
+## 测试
+
 
 
 
