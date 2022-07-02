@@ -9,6 +9,7 @@
     * [🚀 存储加速](posts/存储加速/Content.md)
     * [⚡ 高速缓存](posts/高速缓存/Content.md)
     * [🌊 MIT 6.824](posts/MIT6.824/Content.md)
+    * [☢️ MIT 6.S081](posts/MIT6.S081/Content.md)
     * [☁️ MinIO](posts/MinIO/Content.md)
     * [🐍 DIY Git in Python](posts/u-git/Content.md)
     * [⚓ etcd](posts/etcd/Content.md)
