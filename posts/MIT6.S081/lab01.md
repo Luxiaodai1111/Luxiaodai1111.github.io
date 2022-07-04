@@ -786,28 +786,126 @@ $ find . b
 
 ## 实验目标
 
+目标：编写 xargs 工具，从标准输入读入数据，将每一行当作参数，加入到传给 xargs 的程序名和参数后面作为额外参数，然后执行。
 
+>[!NOTE]
+>
+>-   使用 fork 和 exec 调用每行输入的命令。在父进程中使用 wait 等待子进程完成命令
+>-   要读取单独的输入行，请一次读取一个字符，直到出现换行符(' \n ')
+>-   kernel/param.h 声明了 MAXARG，如果需要声明 argv 数组，这可能会很有用
+>-   Add the program to `UPROGS` in Makefile.
+>-   qemu 文件系统会持久化，要获得干净的文件系统，请运行 make clean，然后 make qemu
+
+以下示例说明 xargs 行为：
+
+```bash
+$ echo hello too | xargs echo bye
+bye hello too
+$
+```
+
+请注意，UNIX 上的 xargs 进行了优化，它一次将不止一个参数提供给命令。我们不期望您进行这种优化。要使 UNIX 上的 xargs 按照我们希望的方式运行，请将 -n 选项设置为 1。例如：
+
+```bash
+$ echo "1\n2" | xargs -n 1 echo line
+line 1
+line 2
+$
+```
+
+qemu 表现应该如下：
+
+```bash
+$ make qemu
+...
+init: starting sh
+$ sh < xargstest.sh
+$ $ $ $ $ $ hello
+hello
+hello
+$ $ 
+```
+
+输出中有许多 $ 是因为 xv6 shell 没有意识到它是从文件而不是从控制台处理命令，并为文件中的每个命令打印一个 $ 号。
 
 
 
 ## 实现
 
+首先将 xargs 命令传入的参数保存，然后从标准输入解析输入参数，根据 `\n` 将参数划分至多行，每行参数把空格替换成 `\0`，并放在参数最后一项，利用 exec 调用函数。
 
+```c
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "kernel/param.h"
+#include "user/user.h"
 
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        printf("please enter more parameters!\n");
+        exit(1);
+    }
 
+    int i;
+    char *params[MAXARG];
+    for (i=1 ; i<argc ; i++) {
+        params[i-1] = argv[i];
+    }
+
+    char buf[2048];
+    int j = 0;
+    // 一个字节一个字节读，直到遇到换行符
+    while(read(0, buf+j, 1) != 0) {
+        if (buf[j] == '\n') {
+            buf[j] = '\0';
+            // 无内容可读
+            if (j == 0) {
+                break;
+            }
+            params[argc -1] = buf;
+            if (fork() == 0) {
+                exec(params[0], params);
+                exit(0);
+            } else {
+                wait(0);
+            }
+            memset(buf, 0, sizeof(buf));
+            j = 0;
+            continue;
+        }
+        j++;
+        // 直接将空格替换为 \0 分割开各个参数
+        if (buf[j] == ' ') {
+            buf[j] = '\0';
+        }
+        if (j == 2048) {
+            printf("parameters are too long\n");
+            exit(1);
+        }
+    }
+
+    exit(0);
+}
+```
 
 
 
 ## 测试
 
 ```bash
-
+root@lz-VirtualBox:~/lab01# ./grade-lab-util xargs
+make: “kernel/kernel”已是最新。
+== Test xargs == xargs: OK (6.4s)
 ```
 
-qemu 测试：
+qemu 测试，记得先 make clean，再 make qemu 启动：
 
 ```bash
-
+$ sh < xargstest.sh
+$ $ $ $ $ $ hello
+hello
+hello
+$ $ 
 ```
 
 
