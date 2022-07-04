@@ -544,14 +544,14 @@ prime 31
 
 ## 实验目标
 
-编写一个简单版本的UNIX find程序:在一个目录树中查找所有具有特定名称的文件。
+编写一个简单版本的UNIX find程序：在一个目录树中查找所有具有特定名称的文件。
 
 >[!NOTE]
 >
 >-   查看 user/ls.c，了解如何读取目录
 >-   使用递归允许 find 进入子目录
 >-   不要递归 `.` 和 `..` 目录
->-   要获得干净的文件系统，请运行 make clean，然后 make qemu
+>-   qemu 文件系统会持久化，要获得干净的文件系统，请运行 make clean，然后 make qemu
 >-   You'll need to use C strings. Have a look at K&R (the C book), for example Section 5.5.
 >-   不能用 == 判断字符串相等，请使用 strcmp
 >-   Add the program to `UPROGS` in Makefile
@@ -606,7 +606,7 @@ struct dirent {
 };
 ```
 
-所以每次从 fd 中读取 sizeof(de)，如果文件 inum == 0，表示目录底下没有文件。否则 stat 读取文件信息并打印。
+所以每次从 fd 中读取 sizeof(de)，如果文件 inum == 0，跳过。否则 stat 读取文件信息并打印。
 
 ```c
 void
@@ -649,7 +649,6 @@ ls(char *path)
     *p++ = '/';
     // 读取目录信息
     while(read(fd, &de, sizeof(de)) == sizeof(de)){
-      // 目录底下没有文件
       if(de.inum == 0)
         continue;
       // path/de.name
@@ -673,10 +672,86 @@ ls(char *path)
 
 ## 实现
 
-这里基于 ls 来修改即可。
+这里基于 ls 来修改即可，遍历目录下每个文件，如果是文件则比较匹配，如果是目录，则递归调用 find。
 
 ```c
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "user/user.h"
+#include "kernel/fs.h"
 
+void
+find(char *dirname, char *filename)
+{
+  char buf[512], *p;
+  int fd;
+  struct dirent de;
+  struct stat st;
+
+  if((fd = open(dirname, 0)) < 0){
+    fprintf(2, "cannot open %s\n", dirname);
+    return;
+  }
+
+  if(fstat(fd, &st) < 0){
+    fprintf(2, "cannot stat %s\n", dirname);
+    close(fd);
+    return;
+  }
+
+  if (st.type != T_DIR) {
+    fprintf(2, "%s's type must be dir\n", dirname);
+    close(fd);
+    return;
+  }
+
+  if (strlen(dirname) + 1 + DIRSIZ + 1 > sizeof buf) {
+    fprintf(2, "dirname too long\n");
+    close(fd);
+    return;
+  }
+
+  strcpy(buf, dirname);
+  p = buf+strlen(buf);
+  *p++ = '/';
+
+  // 遍历目录下每个文件并比较
+  while(read(fd, &de, sizeof(de)) == sizeof(de)){
+    if(de.inum == 0 || strcmp(de.name, ".") == 0 || strcmp(de.name, "..") == 0) {
+      continue;
+    }
+    memmove(p, de.name, DIRSIZ);
+    p[DIRSIZ] = 0;
+    if(stat(buf, &st) < 0){
+      printf("cannot stat %s\n", buf);
+      continue;
+    }
+    switch(st.type){
+      case T_FILE:
+      if (strcmp(de.name, filename) == 0) {
+        printf("%s\n", buf);
+      }
+      break;
+      case T_DIR:
+      // 递归查找
+      find(buf, filename);
+      break;
+    }
+  }
+  close(fd);
+}
+
+int
+main(int argc, char *argv[])
+{
+  if(argc != 3){
+    fprintf(2, "Please enter a dir and a filename!\n");
+    exit(1);
+  }
+
+  find(argv[1], argv[2]);
+  exit(0);
+}
 ```
 
 
@@ -686,13 +761,21 @@ ls(char *path)
 ## 测试
 
 ```bash
-
+root@lz-VirtualBox:~/lab01# ./grade-lab-util find
+make: “kernel/kernel”已是最新。
+== Test find, in current directory == find, in current directory: OK (4.0s) 
+== Test find, recursive == find, recursive: OK (4.8s)
 ```
 
 qemu 测试：
 
 ```bash
-
+$ echo > b
+$ mkdir a
+$ echo > a/b
+$ find . b
+./b
+./a/b
 ```
 
 
