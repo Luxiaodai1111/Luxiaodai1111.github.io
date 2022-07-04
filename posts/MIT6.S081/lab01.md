@@ -542,15 +542,190 @@ prime 31
 
 # find
 
+## 实验目标
+
+编写一个简单版本的UNIX find程序:在一个目录树中查找所有具有特定名称的文件。
+
+>[!NOTE]
+>
+>-   查看 user/ls.c，了解如何读取目录
+>-   使用递归允许 find 进入子目录
+>-   不要递归 `.` 和 `..` 目录
+>-   要获得干净的文件系统，请运行 make clean，然后 make qemu
+>-   You'll need to use C strings. Have a look at K&R (the C book), for example Section 5.5.
+>-   不能用 == 判断字符串相等，请使用 strcmp
+>-   Add the program to `UPROGS` in Makefile
+
+实验结果应该如下：
+
+```bash
+$ make qemu
+...
+init: starting sh
+$ echo > b
+$ mkdir a
+$ echo > a/b
+$ find . b
+./b
+./a/b
+$ 
+```
 
 
 
+## 程序分析
+
+首先我们来看下 ls 怎么实现的。main 函数处理非常简单，如果没有携带参数，默认输出 `.` 下的文件，否则遍历参数输出。
+
+```c
+int
+main(int argc, char *argv[])
+{
+  int i;
+
+  if(argc < 2){
+    ls(".");
+    exit(0);
+  }
+  for(i=1; i<argc; i++)
+    ls(argv[i]);
+  exit(0);
+}
+
+```
+
+ls 在打开和访问文件后，如果是文件，则直接输出信息，如果是目录，则要去遍历目录底下每个文件。xv6 中目录其实是一个包含一连串 dirent 结构的文件。
+
+```bash
+// Directory is a file containing a sequence of dirent structures.
+#define DIRSIZ 14
+
+struct dirent {
+  ushort inum;
+  char name[DIRSIZ];
+};
+```
+
+所以每次从 fd 中读取 sizeof(de)，如果文件 inum == 0，表示目录底下没有文件。否则 stat 读取文件信息并打印。
+
+```c
+void
+ls(char *path)
+{
+  char buf[512], *p;
+  int fd;
+  struct dirent de;
+  struct stat st;
+
+  // 打开文件，获取文件描述符
+  if((fd = open(path, 0)) < 0){
+    fprintf(2, "ls: cannot open %s\n", path);
+    return;
+  }
+
+  // 访问文件，并把文件信息存入 st
+  if(fstat(fd, &st) < 0){
+    fprintf(2, "ls: cannot stat %s\n", path);
+    close(fd);
+    return;
+  }
+
+  // 根据 st 信息判断是目录还是文件
+  switch(st.type){
+  case T_FILE:
+    // 如果是文件，输出文件信息
+    printf("%s %d %d %l\n", fmtname(path), st.type, st.ino, st.size);
+    break;
+
+  case T_DIR:
+    // 如果是目录，则需要打印目录底下所有文件的信息
+    if(strlen(path) + 1 + DIRSIZ + 1 > sizeof buf){
+      printf("ls: path too long\n");
+      break;
+    }
+    // 记录目录前缀
+    strcpy(buf, path);
+    p = buf+strlen(buf);
+    *p++ = '/';
+    // 读取目录信息
+    while(read(fd, &de, sizeof(de)) == sizeof(de)){
+      // 目录底下没有文件
+      if(de.inum == 0)
+        continue;
+      // path/de.name
+      memmove(p, de.name, DIRSIZ);
+      p[DIRSIZ] = 0;
+      if(stat(buf, &st) < 0){
+        printf("ls: cannot stat %s\n", buf);
+        continue;
+      }
+      printf("%s %d %d %d\n", fmtname(buf), st.type, st.ino, st.size);
+    }
+    break;
+  }
+  close(fd);
+}
+```
+
+
+
+
+
+## 实现
+
+这里基于 ls 来修改即可。
+
+```c
+
+```
+
+
+
+
+
+## 测试
+
+```bash
+
+```
+
+qemu 测试：
+
+```bash
+
+```
 
 
 
 ---
 
 # xargs
+
+## 实验目标
+
+
+
+
+
+## 实现
+
+
+
+
+
+
+
+## 测试
+
+```bash
+
+```
+
+qemu 测试：
+
+```bash
+
+```
 
 
 
