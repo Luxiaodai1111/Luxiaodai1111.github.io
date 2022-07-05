@@ -106,7 +106,7 @@ The takeaway is that after you write a test, you shouldn’t need to touch that 
 
 Now that we understand our goal, let’s look at some practices for making sure that tests don’t need to change unless the requirements of the system being tested change. By far the most important way to ensure this is to write tests that invoke the system being tested in the same way its users would; that is, make calls against its public API [rather than its implementation details](https://oreil.ly/ijat0). If tests work the same way as the system’s users, by definition, change that breaks a test might also break a user. As an additional bonus, such tests can serve as useful examples and documentation for users.
 
-现在我们了解了我们的目标，让我们看看一些做法，以确保测试不需要改变，除非被测试系统的需求改变。到目前为止，确保这一点的最重要的方法是编写测试，以与用户相同的方式调用正在测试的系统；也就是说，针对其公共API[而不是其实现细节]进行调用（https://oreil.ly/ijat0）。如果测试的工作方式与系统的用户相同，根据定义，破坏测试的变化也可能破坏用户。作为一个额外的好处，这样的测试可以作为用户的有用的例子和文档。
+现在我们了解了我们的目标，让我们看看一些做法，以确保测试不需要改变，除非被测试系统的需求改变。到目前为止，确保这一点的最重要的方法是编写测试，以与用户相同的方式调用正在测试的系统；也就是说，针对其公共API[而不是其实现细节](https://oreil.ly/ijat0)进行调用。如果测试的工作方式与系统的用户相同，根据定义，破坏测试的变化也可能破坏用户。作为一个额外的好处，这样的测试可以作为用户的有用的例子和文档。
 
 Consider [Example 12-1](#_bookmark959), which validates a transaction and saves it to a database.
 
@@ -644,7 +644,7 @@ if result != 5 {
 
 One final aspect of writing clear tests and avoiding brittleness has to do with code sharing. Most software attempts to achieve a principle called DRY—“Don’t Repeat Yourself.” DRY states that software is easier to maintain if every concept is canonically represented in one place and code duplication is kept to a minimum. This approach is especially valuable in making changes easier because an engineer needs to update only one piece of code rather than tracking down multiple references. The downside to such consolidation is that it can make code unclear, requiring readers to follow chains of references to understand what the code is doing.
 
-编写清晰的测试和避免脆弱性的最后一个方面与代码共享有关。大多数软件都试图实现一个称为DRY的原则——“不要重复你自己。”DRY指出，如果每个概念都在一个地方被规范地表示，并且代码复制保持在最低限度，那么软件就更容易维护。这种方法在简化更改方面尤其有用，因为工程师只需要更新一段代码，而不需要跟踪多个引用。。这种合并的缺点是，它可能会使代码变得不清楚，需要读者跟随引用链来理解代码在做什么。
+编写清晰的测试和避免脆弱性的最后一个方面与代码共享有关。大多数软件都试图实现一个称为DRY的原则——“不要重复你自己。”DRY指出，如果每个概念都在一个地方被规范地表示，并且代码复制保持在最低限度，那么软件就更容易维护。这种方法在简化更改方面尤其有用，因为工程师只需要更新一段代码，而不需要跟踪多个引用。这种合并的缺点是，它可能会使代码变得不清楚，需要读者跟随引用链来理解代码在做什么。
 
 In normal production code, that downside is usually a small price to pay for making code easier to change and work with. But this cost/benefit analysis plays out a little differently in the context of test code. Good tests are designed to be stable, and in fact you usually want them to break when the system being tested changes. So DRY doesn’t have quite as much benefit when it comes to test code. At the same time, the costs of complexity are greater for tests: production code has the benefit of a test suite to ensure that it keeps working as it becomes complex, whereas tests must stand by themselves, risking bugs if they aren’t self-evidently correct. As mentioned earlier, something has gone wrong if tests start becoming complex enough that it feels like they need their own tests to ensure that they’re working properly.
 
@@ -814,10 +814,9 @@ public void fullNameShouldCombineFirstAndLastNames() {
 
 Using helper methods to construct these values allows each test to create the exact values it needs without having to worry about specifying irrelevant information or conflicting with other tests.
 
-```
-7	In many cases, it can even be useful to slightly randomize the default values returned for fields that aren’t explicitly set. This helps to ensure that two different instances won’t accidentally compare as equal, and makes it more difficult for engineers to hardcode dependencies on the defaults.
-7   在许多情况下，甚至可以对未显式设置的字段返回的默认值进行轻微的随机化。这有助于确保两个不同的实例不会意外地比较为相等，并使工程师更难硬编码对默认值的依赖关系。
-```
+In many cases, it can even be useful to slightly randomize the default values returned for fields that aren’t explicitly set. This helps to ensure that two different instances won’t accidentally compare as equal, and makes it more difficult for engineers to hardcode dependencies on the defaults.
+
+在许多情况下，甚至可以对未显式设置的字段返回的默认值进行轻微的随机化。这有助于确保两个不同的实例不会意外地比较为相等，并使工程师更难硬编码对默认值的依赖关系。
 
 ### Shared Setup  共享设置
 A related way that tests shared code is via setup/initialization logic. Many test frameworks allow engineers to define methods to execute before each test in a suite is run. Used appropriately, these methods can make tests clearer and more concise by obviating the repetition of tedious and irrelevant initialization logic. Used inappropriately, these methods can harm a test’s completeness by hiding important details in a separate initialization method.
