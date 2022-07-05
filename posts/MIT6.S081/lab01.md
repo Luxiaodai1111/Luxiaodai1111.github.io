@@ -96,11 +96,11 @@ $ QEMU: Terminated
 >[!NOTE]
 >
 >-   开始编码前，阅读 [xv6 book](https://pdos.csail.mit.edu/6.828/2021/xv6/book-riscv-rev2.pdf) 第一章
->-   查看 user/ 中的一些其他程序例如 user/echo.c、user/grep.c 和 user/rm.c，了解如何获得传递给程序的命令行参数。
->-   如果用户忘记传递参数，sleep 要显示错误消息。
->-   命令行参数作为字符串传递；可以使用 atoi 将其转换为整数（参见user/ulib.c）。
+>-   查看 user/ 中的一些其他程序例如 user/echo.c、user/grep.c 和 user/rm.c，了解如何获得传递给程序的命令行参数
+>-   如果用户忘记传递参数，sleep 要显示错误消息
+>-   命令行参数作为字符串传递；可以使用 atoi 将其转换为整数（参见user/ulib.c）
 >-   使用 sleep 系统调用
->-   查看 kernel/sysproc.c 有关实现 sleep 系统调用的 xv6 内核代码（搜索 sys_sleep），user/user.h 是有关可从用户程序调用的 sleep 的 C 定义，user/usys.S 是从用户代码跳转到内核休眠的汇编代码。
+>-   查看 kernel/sysproc.c 有关实现 sleep 系统调用的 xv6 内核代码（搜索 sys_sleep），user/user.h 是有关可从用户程序调用的 sleep 的 C 定义，user/usys.S 是从用户代码跳转到内核休眠的汇编代码
 >-   确保 main 调用 exit() 退出程序
 >-   在 Makefile 的 UPROGS 部分添加 sleep，这样 make qemu 之后会帮你自动编译进系统
 >-   学习 C 语言
@@ -914,11 +914,210 @@ $ $
 
 ---
 
-# 挑战：修改 sh
+# 可选挑战：优化 sh
 
+上面 xargs 测试可以看到输出了很多 `$` 不是很美观，而且也不支持命令补全等，使用起来不是很方便，因此这里把 shell 优化一下。首先我们分析 sh 是怎么实现的，代码在 user/sh.c。从 main 入口可以看到，sh 并没有真的打开 console 文件，只是确保 0/1/2 号描述符都存在，然后不停地检测输入，如果输入是 cd，则调用 chdir，否则创建子进程去执行命令。
 
+```c
+int
+main(void)
+{
+  static char buf[100];
+  int fd;
 
+  // Ensure that three file descriptors are open.
+  while((fd = open("console", O_RDWR)) >= 0){
+    if(fd >= 3){
+      close(fd);
+      break;
+    }
+  }
 
+  // Read and run input commands.
+  while(getcmd(buf, sizeof(buf)) >= 0){
+    if(buf[0] == 'c' && buf[1] == 'd' && buf[2] == ' '){
+      // Chdir must be called by the parent, not the child.
+      buf[strlen(buf)-1] = 0;  // chop \n
+      if(chdir(buf+3) < 0)
+        fprintf(2, "cannot cd %s\n", buf+3);
+      continue;
+    }
+    if(fork1() == 0)
+      runcmd(parsecmd(buf));
+    wait(0);
+  }
+  exit(0);
+}
+```
 
+每次要从标准输入接收命令前，sh 都会打印一个 `$`，所以才会导致从文件输入时，检测到 `\n` 就会输出一个`$` 从而导致输出冗余。
 
+```c
+int
+getcmd(char *buf, int nbuf)
+{
+  fprintf(2, "$ ");
+  memset(buf, 0, nbuf);
+  gets(buf, nbuf);
+  if(buf[0] == 0) // EOF
+    return -1;
+  return 0;
+}
+```
+
+从这里我们就可以开始简单改造下了，主要是改造 getcmd，让他能够识别输入来源以及增加命令补全命令。因为自动补全设置回显以及终端控制比较麻烦，所以只做了简单的命令补全功能，在当前目录下匹配第一个前缀匹配的项进行补全，并把参考补全项打印出来，匹配逻辑和 find 相似。
+
+主要修改代码如下：
+
+```c
+// 检测是否合法的命令字符
+int is_valid_identifier_char(char c) {
+  return (c >= 'A' && c <= 'Z') || 
+  (c >= 'a' && c <= 'z') || 
+  (c >= '0' && c <= '9') || 
+  c == '_' || c == '.' || c == '-';
+}
+
+// 找到要匹配的字符串
+char *find_last_word(char *cmdbuf) {
+  char *c = cmdbuf + strlen(cmdbuf) - 1;
+  while(is_valid_identifier_char(*c) && c != cmdbuf-1) {
+    c--;
+  }
+  return ++c;
+}
+
+// 只支持从当前目录下查找，并对第一个前缀匹配项补全，返回值为辅助补全的字符数目
+int tab_completion(char *dirname, char *cmdbuf) {
+  char *last_cmd = find_last_word(cmdbuf);
+  char completed_cmd[4][DIRSIZ];
+  int idx = 0;
+
+  char buf[512], *p;
+  int fd;
+  struct dirent de;
+  struct stat st;
+  int ret = 0;
+
+  if((fd = open(dirname, 0)) < 0){
+    return 0;
+  }
+
+  if(fstat(fd, &st) < 0){
+    close(fd);
+    return 0;
+  }
+
+  if (strlen(dirname) + 1 + DIRSIZ + 1 > sizeof buf) {
+    close(fd);
+    return 0;
+  }
+
+  strcpy(buf, dirname);
+  p = buf+strlen(buf);
+  *p++ = '/';
+
+  // 遍历目录下每个文件并比较
+  while(read(fd, &de, sizeof(de)) == sizeof(de)){
+    if(de.inum == 0 || strcmp(de.name, ".") == 0 || strcmp(de.name, "..") == 0) {
+      continue;
+    }
+    memmove(p, de.name, DIRSIZ);
+    p[DIRSIZ] = 0;
+    if(stat(buf, &st) < 0){
+      continue;
+    }
+    if (memcmp(de.name, last_cmd, strlen(last_cmd)) == 0) {
+      strcpy(completed_cmd[idx], de.name);
+      idx++;
+      if (idx == 4) {
+        break;
+      }
+    }
+  }
+  // 选取第一个匹配的自动补全并打印其余的备选项
+  for(int i=0; i<idx; i++) {
+    if (i == 0) {
+      ret = strlen(completed_cmd[i]) - strlen(last_cmd);
+      strcpy(last_cmd, completed_cmd[i]);
+      printf("Auto Completion: %s\n", cmdbuf);
+    } else {
+      printf("Alternative Complementary Items: %s\n", completed_cmd[i]);
+    }
+  }
+  if (idx >0) {
+    printf("=========================================\n\n");
+  }
+
+  close(fd);
+  return ret;
+}
+
+int
+getcmd(char *buf, int nbuf)
+{
+  if (script_fd == -1) {
+    // 消除冗余符号
+    fprintf(2, "$ ");
+  }
+
+  int i, cc;
+  char c;
+
+  // 按字符来读取
+  for(i=0 ;i+1<nbuf;) {
+    if (script_fd == -1) {
+      cc = read(0, &c, 1);
+    } else {
+      cc = read(script_fd, &c, 1);
+    }
+    if (cc < 1){
+      break;
+    }
+    if (c == '\t') {
+      // 命令补全
+      i += tab_completion(".", buf);
+    } else {
+      buf[i++] = c;
+      if (c == '\n' || c == '\r'){
+        break;
+      }
+    }
+  }
+  buf[i] = '\0';
+  
+  if(buf[0] == 0) // EOF
+    return -1;
+  return 0;
+}
+
+int
+main(int argc, char *argv[])
+{
+  static char buf[100];
+  int fd;
+
+  // 标识输入是文件
+  if (argc == 2) {
+    script_fd = open(argv[1], O_RDWR);
+  }
+
+  ...
+}
+```
+
+我们去测试一下：
+
+```bash
+# sh xar\t(回车)
+$ sh xar	
+Auto Completion: sh xargstest.sh
+Alternative Complementary Items: xargs
+=========================================
+
+hello
+hello
+hello
+$
+```
 

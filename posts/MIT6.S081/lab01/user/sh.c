@@ -3,6 +3,8 @@
 #include "kernel/types.h"
 #include "user/user.h"
 #include "kernel/fcntl.h"
+#include "kernel/fs.h"
+#include "kernel/stat.h"
 
 // Parsed command representation
 #define EXEC  1
@@ -52,6 +54,9 @@ struct backcmd {
 int fork1(void);  // Fork but panics on failure.
 void panic(char*);
 struct cmd *parsecmd(char*);
+
+// 标记是否从文件读取
+int script_fd = -1;
 
 // Execute cmd.  Never returns.
 void
@@ -130,22 +135,137 @@ runcmd(struct cmd *cmd)
   exit(0);
 }
 
+// 检测是否合法的命令字符
+int is_valid_identifier_char(char c) {
+  return (c >= 'A' && c <= 'Z') || 
+  (c >= 'a' && c <= 'z') || 
+  (c >= '0' && c <= '9') || 
+  c == '_' || c == '.' || c == '-';
+}
+
+// 找到要匹配的字符串
+char *find_last_word(char *cmdbuf) {
+  char *c = cmdbuf + strlen(cmdbuf) - 1;
+  while(is_valid_identifier_char(*c) && c != cmdbuf-1) {
+    c--;
+  }
+  return ++c;
+}
+
+// 只支持从当前目录下查找，并对第一个前缀匹配项补全，返回值为辅助补全的字符数目
+int tab_completion(char *dirname, char *cmdbuf) {
+  char *last_cmd = find_last_word(cmdbuf);
+  char completed_cmd[4][DIRSIZ];
+  int idx = 0;
+
+  char buf[512], *p;
+  int fd;
+  struct dirent de;
+  struct stat st;
+  int ret = 0;
+
+  if((fd = open(dirname, 0)) < 0){
+    return 0;
+  }
+
+  if(fstat(fd, &st) < 0){
+    close(fd);
+    return 0;
+  }
+
+  if (strlen(dirname) + 1 + DIRSIZ + 1 > sizeof buf) {
+    close(fd);
+    return 0;
+  }
+
+  strcpy(buf, dirname);
+  p = buf+strlen(buf);
+  *p++ = '/';
+
+  // 遍历目录下每个文件并比较
+  while(read(fd, &de, sizeof(de)) == sizeof(de)){
+    if(de.inum == 0 || strcmp(de.name, ".") == 0 || strcmp(de.name, "..") == 0) {
+      continue;
+    }
+    memmove(p, de.name, DIRSIZ);
+    p[DIRSIZ] = 0;
+    if(stat(buf, &st) < 0){
+      continue;
+    }
+    if (memcmp(de.name, last_cmd, strlen(last_cmd)) == 0) {
+      strcpy(completed_cmd[idx], de.name);
+      idx++;
+      if (idx == 4) {
+        break;
+      }
+    }
+  }
+  // 选取第一个匹配的自动补全并打印其余的备选项
+  for(int i=0; i<idx; i++) {
+    if (i == 0) {
+      ret = strlen(completed_cmd[i]) - strlen(last_cmd);
+      strcpy(last_cmd, completed_cmd[i]);
+      printf("Auto Completion: %s\n", cmdbuf);
+    } else {
+      printf("Alternative Complementary Items: %s\n", completed_cmd[i]);
+    }
+  }
+  if (idx >0) {
+    printf("=========================================\n\n");
+  }
+
+  close(fd);
+  return ret;
+}
+
 int
 getcmd(char *buf, int nbuf)
 {
-  fprintf(2, "$ ");
-  memset(buf, 0, nbuf);
-  gets(buf, nbuf);
+  if (script_fd == -1) {
+    // 消除冗余符号
+    fprintf(2, "$ ");
+  }
+
+  int i, cc;
+  char c;
+
+  // 按字符来读取
+  for(i=0 ;i+1<nbuf;) {
+    if (script_fd == -1) {
+      cc = read(0, &c, 1);
+    } else {
+      cc = read(script_fd, &c, 1);
+    }
+    if (cc < 1){
+      break;
+    }
+    if (c == '\t') {
+      // 命令补全
+      i += tab_completion(".", buf);
+    } else {
+      buf[i++] = c;
+      if (c == '\n' || c == '\r'){
+        break;
+      }
+    }
+  }
+  buf[i] = '\0';
+  
   if(buf[0] == 0) // EOF
     return -1;
   return 0;
 }
 
 int
-main(void)
+main(int argc, char *argv[])
 {
   static char buf[100];
   int fd;
+
+  // 标识输入是文件
+  if (argc == 2) {
+    script_fd = open(argv[1], O_RDWR);
+  }
 
   // Ensure that three file descriptors are open.
   while((fd = open("console", O_RDWR)) >= 0){
@@ -313,6 +433,7 @@ peek(char **ps, char *es, char *toks)
   char *s;
 
   s = *ps;
+  // 忽略命令前的空白
   while(s < es && strchr(whitespace, *s))
     s++;
   *ps = s;
