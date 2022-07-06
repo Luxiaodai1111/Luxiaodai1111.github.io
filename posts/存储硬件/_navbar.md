@@ -16,6 +16,7 @@
     * [🔥 redis](posts/redis/Content.md)
     * [🧮 数据结构与算法](posts/数据结构与算法/Content.md)
     * [🖥️ 常用技术](posts/常用技术/Content.md)
+    * [🌋 性能之巅](posts/性能之巅/Content.md)
 * ❤️ 友链
   * [💘 Learn Git Branching](https://learngitbranching.js.org/?locale=zh_CN)
   * [💘 drawio](https://app.diagrams.net/)

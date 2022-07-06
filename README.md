@@ -68,6 +68,10 @@
 >
 >   日常开发常用技术
 
+>## [🌋 性能之巅](posts/性能之巅/Content.md)
+>
+>Linux 性能分析
+
 <!-- panels:end -->
 
 
