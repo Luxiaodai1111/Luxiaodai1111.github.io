@@ -64,7 +64,7 @@
 >
 >   存储系统常用引擎、Linux 内核数据结构等
 
->   ## [🖥️ 常用技术](posts/常用技术/Content.md)
+>   ## [🔧 常用技术](posts/常用技术/Content.md)
 >
 >   日常开发常用技术
 
@@ -129,3 +129,6 @@
 # 🔮 Others
 
 [🌌 Software Engineering at Google](posts/Software-Engineering-at-Google/Content.md)
+
+🖥️ [The Art of Command Line](https://github.com/jlevy/the-art-of-command-line)
+
