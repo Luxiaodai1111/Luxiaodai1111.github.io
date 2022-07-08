@@ -87,7 +87,7 @@ MinIO 在分布式和单机模式下，所有读写操作都严格遵守 read-af
 
 
 
-## 环境搭建
+## 单节点环境搭建
 
 这里我在单节点上搭建环境演示，要注意不能在根磁盘路径中启动，必须使用独立磁盘。
 
@@ -140,6 +140,105 @@ Documentation: https://docs.min.io
 
 15 directories, 4 files
 ```
+
+
+
+## 多节点环境搭建
+
+三节点：10.10.10.220 - 222，首先关闭防火墙，selinux 等配置。然后每个节点的 systemd 服务配置（/etc/systemd/system/minio.service）如下：
+
+```bash
+[Unit]
+Description=MinIO
+Documentation=https://docs.min.io
+Wants=network-online.target
+After=network-online.target
+AssertFileIsExecutable=/usr/local/bin/minio
+
+[Service]
+WorkingDirectory=/usr/local
+
+#User=minio-user
+#Group=minio-user
+User=root
+Group=root
+
+EnvironmentFile=-/etc/default/minio
+ExecStartPre=/bin/bash -c "if [ -z \"${MINIO_VOLUMES}\" ]; then echo \"Variable MINIO_VOLUMES not set in /etc/default/minio\"; exit 1; fi"
+ExecStart=/usr/local/bin/minio server $MINIO_OPTS $MINIO_VOLUMES
+
+# Let systemd restart this service always
+Restart=always
+
+# Specifies the maximum file descriptor number that can be opened by this process
+LimitNOFILE=65536
+
+# Specifies the maximum number of threads this process can create
+TasksMax=infinity
+
+# Disable timeout logic and wait until process is stopped
+TimeoutStopSec=infinity
+SendSIGKILL=no
+
+[Install]
+WantedBy=multi-user.target
+
+# Built for ${project.name}-${project.version} (${project.name})
+
+```
+
+每个节点配置文件 /etc/default/minio，EC 比例 5：1
+
+```bash
+# Set the hosts and volumes MinIO uses at startup
+# The command uses MinIO expansion notation {x...y} to denote a
+# sequential series.
+#
+# The following example covers four MinIO hosts
+# with 4 drives each at the specified hostname and drive locations.
+# The command includes the port that each MinIO server listens on
+# (default 9000)
+
+#MINIO_VOLUMES="https://minio{1...4}.example.net:9000/mnt/disk{1...4}/minio"
+MINIO_VOLUMES="http://10.10.10.{220...222}:9000/mnt/{0...5}"
+
+# Set all MinIO server options
+#
+# The following explicitly sets the MinIO Console listen address to
+# port 9001 on all network interfaces. The default behavior is dynamic
+# port selection.
+
+MINIO_OPTS="--console-address :9001"
+
+# Set the root username. This user has unrestricted permissions to
+# perform S3 and administrative API operations on any resource in the
+# deployment.
+#
+# Defer to your organizations requirements for superadmin user name.
+
+MINIO_ROOT_USER=minioadmin
+
+# Set the root password
+#
+# Use a long, random, unique string that meets your organizations
+# requirements for passwords.
+
+#MINIO_ROOT_PASSWORD=minio-secret-key-CHANGE-ME
+MINIO_ROOT_PASSWORD=minioadmin
+
+# Set to the URL of the load balancer for the MinIO deployment
+# This value *must* match across all MinIO servers. If you do
+# not have a load balancer, set this value to to any *one* of the
+# MinIO hosts in the deployment as a temporary measure.
+
+# MINIO_SERVER_URL="https://minio.example.net:9000"
+MINIO_ERASURE_SET_DRIVE_COUNT=6
+MINIO_STORAGE_CLASS_STANDARD=EC:1
+MINIO_STORAGE_CLASS_RRS=EC:1
+_MINIO_SERVER_DEBUG=off
+```
+
+然后每个节点启动 system 服务即可。
 
 
 
