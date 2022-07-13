@@ -4,7 +4,7 @@ Linux kprobes 调试技术是内核开发者们专门为了便于跟踪内核函
 
 kprobes 技术目前提供了 3 种探测手段：kprobe、jprobe 和 kretprobe，其中 jprobe 和 kretprobe 是基于 kprobe 实现的，他们分别应用于不同的探测场景中。
 
-
+---
 
 # kprobes技术背景
 
@@ -50,7 +50,7 @@ kprobes 的特点与使用限制：
 
 10、如果当在进入和退出一个函数时，CPU 运行在非当前任务所有的栈上，那么往该函数上注册 kretprobe 可能会导致不可预料的后果，因此，kprobes 不支持在X86_64 的结构下为 __switch_to() 函数注册 kretprobe，将直接返回 -EINVAL。
 
-
+---
 
 # kprobe原理
 
@@ -68,7 +68,7 @@ kprobes 的特点与使用限制：
 
 5、最后，执行流程回到被探测指令之后的正常流程继续执行。
 
-
+---
 
 # kprobe使用实例
 
@@ -485,7 +485,7 @@ MODULE_DESCRIPTION("kprobe debug");
 
 
 
-
+---
 
 # jprobe
 
@@ -571,7 +571,7 @@ MODULE_DESCRIPTION("jprobe debug");
 [853375.256702] jprobe at ffffffffa7c65870 unregistered
 ```
 
-
+---
 
 # kretprobe
 
@@ -703,6 +703,8 @@ Dec  9 15:50:41 centos kernel: Missed probing 0 instances of do_add_mount
 ```
 
 
+
+---
 
 # 参考与感谢
 
