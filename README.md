@@ -110,15 +110,13 @@
 
 # 📄 经典论文导读
 
-[📄 MapReduce: Simplified Data Processing on Large Clusters](posts/经典论文导读/MapReduce.md)
+>每一个领域内，都有非常多优秀的认可度高的会议或者期刊。对于计算机领域而言，一般的分类方式是 [CCF](https://www.ccf.org.cn/) 评级，从 A 到 C 含金量依次降低。
+>
+>此外还可以参考这个网站的论文分级：[Computer Science Conference Rankings](https://link.zhihu.com/?target=http%3A//webdocs.cs.ualberta.ca/~zaiane/htmldocs/ConfRanking.html)
+>
+>[🔑 开始探索](posts/经典论文导读/Content.md)
 
-[📄 The Google File System](posts/经典论文导读/GFS.md)
 
-[📄 In Search of an Understandable Consensus Algorithm (Extended Version)](posts/经典论文导读/Raft-extended.md)
-
-[📄 Finding a needle in Haystack: Facebook’s photo storage](posts/经典论文导读/Haystack.md)
-
-[📄 f4: Facebook’s Warm BLOB Storage System](posts/经典论文导读/f4.md)
 
 
 

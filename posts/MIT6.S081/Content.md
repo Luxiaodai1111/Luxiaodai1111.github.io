@@ -16,6 +16,12 @@ xv6 补充资源：
 -   [Operating Systems: Three Easy Pieces](https://pages.cs.wisc.edu/~remzi/OSTEP/)
 -   [程序员的自我修养——链接装载与库](https://book.douban.com/subject/3652388/)
 
+顶级会议：
+
+-   [USENIX Symposium on Operating Systems Design and Implementations（OSDI）](http://dblp.uni-trier.de/db/conf/osdi/)
+-   [ACM Symposium on Operating Systems Principles（SOSP）](http://dblp.uni-trier.de/db/conf/sosp/)
+-   [The ACM Special Interest Group in Operating Systems（SIGOPS）](https://www.sigops.org/)
+
 ​	
 
 ---
