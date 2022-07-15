@@ -445,3 +445,4 @@
 
 -   [Welcome to FIO’s documentation!](https://fio.readthedocs.io/en/latest/)
 -   [fio Github](https://github.com/axboe/fio)
+-   [fio使用指南（最全的参数说明）](https://blog.csdn.net/sch0120/article/details/76154205)
