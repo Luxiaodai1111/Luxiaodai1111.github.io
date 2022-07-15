@@ -8,7 +8,7 @@
 
 ---
 
-# Job file 参数
+# Job file 常用参数
 
 ## 参数类型
 
@@ -280,25 +280,25 @@
 
 **blocksize（bs）**用于 I/O 单元的块大小（以字节为单位）。默认值:4096。语法为 `bs=int[,int][,int]`，单个值适用于读取、写入和 trim，也可以为读取、写入和 trim 指定值，不以逗号结尾的值适用于后续类型。示例如下：
 
->   -   **bs=256k**
+>   **bs=256k**
 >
->       means 256k for reads, writes and trims.
+>   means 256k for reads, writes and trims.
 >
->       **bs=8k,32k**
+>   **bs=8k,32k**
 >
->       means 8k for reads, 32k for writes and trims.
+>   means 8k for reads, 32k for writes and trims.
 >
->       **bs=8k,32k,**
+>   **bs=8k,32k,**
 >
->       means 8k for reads, 32k for writes, and default for trims.
+>   means 8k for reads, 32k for writes, and default for trims.
 >
->       **bs=,8k**
+>   **bs=,8k**
 >
->       means default for reads, 8k for writes and trims.
+>   means default for reads, 8k for writes and trims.
 >
->       **bs=,8k,**
+>   **bs=,8k,**
 >
->       means default for reads, 8k for writes, and default for trims.
+>   means default for reads, 8k for writes, and default for trims.
 
 **blocksize_range（bsrange）** 表示 I/O 单元的块大小范围（以字节为单位），语法同 blocksize，比如 `bsrange=1k-4k，2k-8k`
 
@@ -324,6 +324,71 @@
 
 ## IO 大小
 
+**size** 表示每个线程的总 IO 大小，也可以使用百分比来测试，如 size=20%
+
+通常情况下，fio在由 size 设置的区域内运行，这意味着 size 选项设置了要执行的 I/O 的区域和大小。有时候这不是你想要的。通过这个 **io_size** 选项，可以定义 fio 应该执行的 I/O 量。例如，如果 size 设置为 20GiB，io_size 设置为 5GiB，则 fio 将在第一个 20GiB 内执行I/O，但在 5GiB 完成后退出。相反的情况也是可能的，如果 size 设置为 20GiB，io_size 设置为 40GiB，那么 fio 将在 0..20GiB 区域内执行。
+
+**filesize** 表示单个文件大小，也可以是一个范围，在这种情况下，fio 将在给定的范围内随机选择文件的大小。如果未给定，则每个创建的文件大小相同。此选项在文件大小方面覆盖了 size，即如果指定了 filesize，则 size 仅成为 io_size 的默认值，如果明确设置了 io_size，则 size 没有任何影响。
+
+
+
+## IO 引擎
+
+指定 IO 发起的方式，下面列出部分：
+
+-   sync：同步模型，即使用基本的 read write lseek 等
+-   libaio：Linux 原生异步 I/O。请注意，Linux 可能只支持非缓冲 I/O 的排队行为（设置 direct=1或 buffered=0）
+-   posixaio：POSIX 异步 IO
+-   io_uring：Linux 的异步 IO 模型，另外还有一些其余的异步 IO 模型我没有列出来，是因为它们既不常用也不实用
+-   mmap：文件通过内存映射到用户空间，使用 memcpy 写入和读出数据
+-   rmda：RDMA I/O引擎支持 InfiniBand、RoCE 和 iWARP 协议的 RDMA 内存语义（RDMA 写/RDMA 读）和通道语义(发送/接收)。
+-   rados：I/O引擎支持通过librados直接访问Ceph可靠的自主分布式对象存储(RADOS)。
+-   rdb：I/O 引擎支持通过 librbd 直接访问 Ceph Rados 块设备 RBD，而无需使用内核 rbd 驱动程序。
+-   http：I/O 引擎支持使用 libcurl 通过 HTTP(S) 向 WebDAV 或 S3 端点发送 GET/PUT 请求。
+-   nfs：I/O 引擎支持通过 libnfs 从用户空间对 NFS 文件系统进行异步读写操作。这有助于实现比内核 NFS 更高的并发性和吞吐量。
+-   。。。
+
+某些引擎需要设定特定的参数才能工作，具体请参考官方文档，比如测试 S3：
+
+-   http_host：要连接的主机名，默认为 localhost
+-   https：是否启用 https，默认为 off
+-   http_mode：使用哪种 HTTP 访问模式：webdav、swift 或 s3。默认为 webdav
+-   http_s3_region：The S3 region/zone string. Default is us-east-1
+-   http_s3_key：The S3 secret key.
+-   http_s3_keyid：The S3 key/access id.
+-   http_verbose：从 libcurl 启用详细请求。对调试有用。1 从 libcurl 打开详细日志记录，2 另外启用 HTTP IO 跟踪。默认值为 0
+
+
+
+## 队列深度
+
+如果 IO 引擎是异步的，那么就可以指定 **iodepth** 需要保持的队列深度。
+
+
+
+## IO 重放
+
+可以配合 blktrace 重放 IO
+
+
+
+## 进程选项
+
+-   thread：fio 默认使用 fork 创建 job，但是如果给定了这个选项，fio 将使用 POSIX Threads 的函数 pthread_create 创建线程来创建 job。
+
+
+
+## 报告
+
+-   group_reporting：线程报告汇总
+
+
+
+
+
+---
+
+# 输出解释
 
 
 
@@ -332,10 +397,14 @@
 
 
 
--   ioengine=libaio 指定io引擎使用libaio方式。libaio：Linux本地异步I/O。请注意，Linux可能只支持具有非缓冲I/O的排队行为（设置为“direct=1”或“buffered=0”）；rbd:通过librbd直接访问CEPH Rados 
--   iodepth=16 队列的深度为16.在异步模式下，CPU不能一直无限的发命令到SSD。比如SSD执行读写如果发生了卡顿，那有可能系统会一直不停的发命令，几千个，甚至几万个，这样一方面SSD扛不住，另一方面这么多命令会很占内存，系统也要挂掉了。这样，就带来一个参数叫做队列深度。
-    Block Devices（RBD），无需使用内核RBD驱动程序（rbd.ko）。该参数包含很多ioengine，如：libhdfs/rdma等
--   group_reporting 关于显示结果的，汇总每个进程的信息。
+
+
+
+---
+
+# 常用测试项
+
+## 测试块设备
 
 
 
@@ -346,19 +415,19 @@
 3. Write=100% Sequence=100% rw=write （100%顺序写）
 4. Write=100% Ramdon=100% rw=randwrite （100%随机写）
 5. Read=70% Sequence=100% rw=rw, rwmixread=70, rwmixwrite=30
-（70%顺序读，30%顺序写）
+    （70%顺序读，30%顺序写）
 6. Read=70% Ramdon=100% rw=randrw, rwmixread=70, rwmixwrite=30
-(70%随机读，30%随机写)
+    (70%随机读，30%随机写)
+
+
+
+## 测试文件系统
 
 
 
 
 
----
-
-# 常用测试项
-
-
+## 测试对象存储系统
 
 
 
