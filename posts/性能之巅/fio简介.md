@@ -280,23 +280,23 @@
 
 **blocksize（bs）**用于 I/O 单元的块大小（以字节为单位）。默认值:4096。语法为 `bs=int[,int][,int]`，单个值适用于读取、写入和 trim，也可以为读取、写入和 trim 指定值，不以逗号结尾的值适用于后续类型。示例如下：
 
->   **bs=256k**
+>   bs=256k
 >
 >   means 256k for reads, writes and trims.
 >
->   **bs=8k,32k**
+>   bs=8k,32k
 >
 >   means 8k for reads, 32k for writes and trims.
 >
->   **bs=8k,32k,**
+>   bs=8k,32k,
 >
 >   means 8k for reads, 32k for writes, and default for trims.
 >
->   **bs=,8k**
+>   bs=,8k
 >
 >   means default for reads, 8k for writes and trims.
 >
->   **bs=,8k,**
+>   bs=,8k,
 >
 >   means default for reads, 8k for writes, and default for trims.
 
@@ -777,7 +777,7 @@ Disk stats (read/write):
 首先还是测试顺序写，还是先按单线程测试，这样就是只有一个线程在写一个 1G 的文件，IO 大小为 1MB。
 
 ```bash
-# fio -name=test1 -directory=/mnt/0 -direct=1 -thread -rw=write -ioengine=sync -bs=1M -size=10G -thread -numjobs=1 -runtime=300 -group_reporting
+# fio -name=test1 -directory=/mnt/0 -direct=1 -rw=write -ioengine=sync -bs=1M -size=10G -thread -numjobs=1 -runtime=300 -group_reporting
 test1: (g=0): rw=write, bs=(R) 1024KiB-1024KiB, (W) 1024KiB-1024KiB, (T) 1024KiB-1024KiB, ioengine=sync, iodepth=1
 fio-3.7
 Starting 1 thread
@@ -813,7 +813,7 @@ Disk stats (read/write):
 然后我们生成 16 个线程，这样每个线程都写自己大小为 1G 的文件，按照粒度 1M 发送 IO。我们会发现性能其实反而下降了。
 
 ```bash
-# fio -name=test2 -directory=/mnt/0 -direct=1 -thread -rw=write -ioengine=sync -bs=1M -size=10G -thread -numjobs=16 -runtime=300 -group_reporting
+# fio -name=test2 -directory=/mnt/0 -direct=1 -rw=write -ioengine=sync -bs=1M -size=10G -thread -numjobs=16 -runtime=300 -group_reporting
 test2: (g=0): rw=write, bs=(R) 1024KiB-1024KiB, (W) 1024KiB-1024KiB, (T) 1024KiB-1024KiB, ioengine=sync, iodepth=1
 ...
 fio-3.7
@@ -849,7 +849,7 @@ Disk stats (read/write):
 我们再尝试写多个文件，每个线程写入 1024 个文件，每个文件大小为 5 MB，这里限制每个线程最多打开 10 个文件，以免文件描述符打开过多。
 
 ```bash
-# fio -name=test3 -directory=/mnt/0 -direct=1 -thread -rw=write -ioengine=sync -bs=1M -nrfiles=1024 -filesize=5M -openfiles=10 -thread -numjobs=16 -runtime=300 -group_reporting
+# fio -name=test3 -directory=/mnt/0 -direct=1 -rw=write -ioengine=sync -bs=1M -nrfiles=1024 -filesize=5M -openfiles=10 -thread -numjobs=16 -runtime=300 -group_reporting
 test3: (g=0): rw=write, bs=(R) 1024KiB-1024KiB, (W) 1024KiB-1024KiB, (T) 1024KiB-1024KiB, ioengine=sync, iodepth=1
 ...
 fio-3.7
