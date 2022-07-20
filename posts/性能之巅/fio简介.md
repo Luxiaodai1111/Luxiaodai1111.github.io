@@ -320,6 +320,8 @@
 
 **lockmem** 可以限制使用内存，比如 lockmem=1g 只使用 1g 内存进行测试。
 
+**refill_buffers** 重新填充缓冲区，以免上次测试的数据影响。
+
 
 
 ## IO 大小
@@ -351,6 +353,8 @@
 某些引擎需要设定特定的参数才能工作，具体请参考官方文档，比如测试 S3：
 
 -   http_host：要连接的主机名，默认为 localhost
+-   http_user：HTTP 认证用户名
+-   http_pass：HTTP 认证密码
 -   https：是否启用 https，默认为 off
 -   http_mode：使用哪种 HTTP 访问模式：webdav、swift 或 s3。默认为 webdav
 -   http_s3_region：The S3 region/zone string. Default is us-east-1
@@ -909,9 +913,192 @@ Disk stats (read/write):
 
 ## 测试对象存储系统
 
-略
+由于对象存储需要 http 引擎，所以我们需要安装 libcurl 后然后重新编译安装 fio。
 
+```bash
+# 安装 libcurl
+$ yum install openssl-devel libcurl-devel -y
 
+# 临时升级 GCC 编译环境
+$ yum install centos-release-scl -y
+$ yum install devtoolset-8-gcc* -y
+$ scl enable devtoolset-8 bash
+$ gcc -v
+...
+gcc version 8.3.1 20190311 (Red Hat 8.3.1-3) (GCC) 
+
+# 编译 fio
+$ git clone git://git.kernel.dk/fio.git
+$ cd fio
+$ git checkout fio-3.30
+$ ./configure
+$ make
+$ make install
+$ fio -v
+fio-3.30
+$ fio --enghelp
+Available IO engines:
+	cpuio
+	mmap
+	sync
+	psync
+	vsync
+	pvsync
+	pvsync2
+	null
+	net
+	netsplice
+	ftruncate
+	filecreate
+	filestat
+	filedelete
+	exec
+	posixaio
+	falloc
+	e4defrag
+	splice
+	mtd
+	sg
+	io_uring
+	libaio
+	rados
+	http
+```
+
+我们写一个 jobfile
+
+```bash
+; -- start job file --
+[s3test]
+ioengine=http
+size=10G
+bs=5M
+rw=write
+filename=/bucket1/testobj
+http_host=127.0.0.1:9000
+http_mode=s3
+http_s3_key=minioadmin
+http_s3_keyid=minioadmin
+http_s3_region=us-east-1
+http_verbose=0
+direct=1
+thread
+numjobs=32
+runtime=300
+group_reporting
+; -- end job file --
+```
+
+测试
+
+```bash
+[root@localhost ~]# fio s3 
+s3test: (g=0): rw=write, bs=(R) 5120KiB-5120KiB, (W) 5120KiB-5120KiB, (T) 5120KiB-5120KiB, ioengine=http, iodepth=1
+...
+fio-3.30
+Starting 32 threads
+Jobs: 4 (f=4): [_(12),W(1),_(6),W(2),_(8),W(1),_(2)][53.0%][w=646MiB/s][w=129 IOPS][eta 04m:27s]
+s3test: (groupid=0, jobs=32): err= 0: pid=27405: Wed Jul 20 11:21:46 2022
+  write: IOPS=116, BW=582MiB/s (611MB/s)(171GiB/300187msec); 0 zone resets
+    clat (msec): min=52, max=1037, avg=274.38, stdev=55.37
+     lat (msec): min=52, max=1037, avg=274.63, stdev=55.37
+    clat percentiles (msec):
+     |  1.00th=[  169],  5.00th=[  197], 10.00th=[  211], 20.00th=[  230],
+     | 30.00th=[  245], 40.00th=[  257], 50.00th=[  271], 60.00th=[  284],
+     | 70.00th=[  296], 80.00th=[  313], 90.00th=[  342], 95.00th=[  372],
+     | 99.00th=[  435], 99.50th=[  468], 99.90th=[  584], 99.95th=[  667],
+     | 99.99th=[  860]
+   bw (  KiB/s): min=323285, max=1025037, per=100.00%, avg=597557.97, stdev=4804.72, samples=19138
+   iops        : min=   32, max=  200, avg=111.22, stdev= 1.01, samples=19138
+  lat (msec)   : 100=0.03%, 250=34.41%, 500=65.31%, 750=0.23%, 1000=0.03%
+  lat (msec)   : 2000=0.01%
+  cpu          : usr=8.05%, sys=0.49%, ctx=1779478, majf=0, minf=5471
+  IO depths    : 1=100.0%, 2=0.0%, 4=0.0%, 8=0.0%, 16=0.0%, 32=0.0%, >=64=0.0%
+     submit    : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
+     complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
+     issued rwts: total=0,34968,0,0 short=0,0,0,0 dropped=0,0,0,0
+     latency   : target=0, window=0, percentile=100.00%, depth=1
+
+Run status group 0 (all jobs):
+  WRITE: bw=582MiB/s (611MB/s), 582MiB/s-582MiB/s (611MB/s-611MB/s), io=171GiB (183GB), run=300187-300187msec
+```
+
+这里我发现 fio 测试的性能没有 minio 自带的测试工具高。
+
+```bash
+[root@localhost ~]# mc support perf myminio --duration 60s --size=5MiB --concurrent=32
+
+   	THROUGHPUT   	IOPS           
+PUT	1.1 GiB/s	228 objs/s	
+GET	1.0 GiB/s	205 objs/s	
+
+Speedtest: MinIO DEVELOPMENT.GOGET, 1 servers, 36 drives, 5.0 MiB objects, 8 threads
+```
+
+于是打开 top 观察，发现 fio 占用 CPU 资源非常多，我这是 8 核的机器，CPU 已经被 minio 和 fio 全部瓜分了。
+
+```bash
+top - 11:15:32 up 5 days,  1:19,  3 users,  load average: 11.90, 11.99, 7.25
+Tasks: 506 total,   2 running, 504 sleeping,   0 stopped,   0 zombie
+%Cpu0  : 64.9 us, 25.8 sy,  0.0 ni,  1.3 id,  3.7 wa,  0.0 hi,  4.3 si,  0.0 st
+%Cpu1  : 79.5 us, 13.5 sy,  0.0 ni,  2.0 id,  4.4 wa,  0.0 hi,  0.7 si,  0.0 st
+%Cpu2  : 80.6 us, 14.7 sy,  0.0 ni,  1.0 id,  3.3 wa,  0.0 hi,  0.3 si,  0.0 st
+%Cpu3  : 76.5 us, 13.8 sy,  0.0 ni,  2.7 id,  6.7 wa,  0.0 hi,  0.3 si,  0.0 st
+%Cpu4  : 80.3 us, 14.4 sy,  0.0 ni,  1.3 id,  3.0 wa,  0.0 hi,  1.0 si,  0.0 st
+%Cpu5  : 78.9 us, 14.1 sy,  0.0 ni,  2.7 id,  4.0 wa,  0.0 hi,  0.3 si,  0.0 st
+%Cpu6  : 78.1 us, 14.1 sy,  0.0 ni,  2.0 id,  5.1 wa,  0.0 hi,  0.7 si,  0.0 st
+%Cpu7  : 75.8 us, 15.4 sy,  0.0 ni,  2.7 id,  5.7 wa,  0.0 hi,  0.3 si,  0.0 st
+KiB Mem : 16201188 total,  1867080 free,  1816688 used, 12517420 buff/cache
+KiB Swap:  8191996 total,  8191996 free,        0 used. 13763520 avail Mem 
+
+  PID USER      PR  NI    VIRT    RES    SHR S  %CPU %MEM     TIME+ COMMAND                                                                                                
+25055 root      20   0 4712304   1.3g  23968 S 458.1  8.1  27:59.98 minio                                                                                                  
+27326 root      20   0 3099540 183340  11028 S 273.4  1.1   0:47.24 fio                                                                                                    
+27368 root      20   0       0      0      0 R   8.6  0.0   0:01.44 kworker/0:1                                                                                            
+ 2877 root       0 -20       0      0      0 S   4.0  0.0   0:33.16 kworker/0:1H                                                                                           
+   14 root      20   0       0      0      0 S   0.7  0.0   0:00.68 ksoftirqd/1          
+```
+
+使用 perf 观察，发现 CPU 资源基本都是 libcrypto.so 动态库占用了。
+
+```bash
+$ perf top -p `pidof fio`
+Samples: 436K of event 'cycles:ppp', 4000 Hz, Event count (approx.): 146491065746 lost: 0/0 drop: 0/0                                                                       
+Overhead  Shared Object        Symbol                                                                                                                                       
+   3.26%  libc-2.17.so         [.] __memcpy_ssse3_back
+   1.35%  [kernel]             [k] copy_user_enhanced_fast_string
+   1.07%  fio                  [.] get_io_u
+   0.97%  libcrypto.so.1.0.2k  [.] 0x000000000008072e
+   0.97%  libcrypto.so.1.0.2k  [.] 0x0000000000080483
+   0.91%  libcrypto.so.1.0.2k  [.] 0x00000000000804c2
+   0.90%  libcrypto.so.1.0.2k  [.] 0x00000000000804a6
+   0.87%  libcrypto.so.1.0.2k  [.] 0x00000000000804e5
+   0.87%  libcrypto.so.1.0.2k  [.] 0x000000000008074f
+   0.82%  libcrypto.so.1.0.2k  [.] 0x0000000000080547
+   0.81%  libcrypto.so.1.0.2k  [.] 0x000000000008070c
+   0.81%  libcrypto.so.1.0.2k  [.] 0x0000000000080524
+   0.78%  libcrypto.so.1.0.2k  [.] 0x00000000000805aa
+   0.75%  libcrypto.so.1.0.2k  [.] 0x0000000000080507
+   0.75%  libcrypto.so.1.0.2k  [.] 0x00000000000806ce
+   0.75%  libcrypto.so.1.0.2k  [.] 0x00000000000805ea
+   0.74%  libcrypto.so.1.0.2k  [.] 0x0000000000080587
+   0.73%  libcrypto.so.1.0.2k  [.] 0x000000000008076c
+   0.73%  libcrypto.so.1.0.2k  [.] 0x000000000008060c
+   0.72%  libcrypto.so.1.0.2k  [.] 0x000000000008056a
+   0.72%  libcrypto.so.1.0.2k  [.] 0x000000000008064b
+   0.72%  libcrypto.so.1.0.2k  [.] 0x00000000000805cd
+   0.68%  libcrypto.so.1.0.2k  [.] 0x000000000008066d
+   0.67%  libcrypto.so.1.0.2k  [.] 0x00000000000806ac
+   0.66%  libcrypto.so.1.0.2k  [.] 0x000000000008062f
+   0.62%  libcrypto.so.1.0.2k  [.] 0x0000000000080460
+   0.61%  libcrypto.so.1.0.2k  [.] 0x00000000000806f1
+   0.60%  libcrypto.so.1.0.2k  [.] 0x000000000008068f
+   0.52%  libcrypto.so.1.0.2k  [.] 0x000000000007f49c
+   0.46%  libcrypto.so.1.0.2k  [.] 0x000000000007f488
+   0.43%  [kernel]             [k] system_call_after_swapgs
+   0.43%  libcrypto.so.1.0.2k  [.] 0x000000000007fce5
+
+```
 
 
 
@@ -924,3 +1111,4 @@ Disk stats (read/write):
 -   [Welcome to FIO’s documentation!](https://fio.readthedocs.io/en/latest/)
 -   [fio Github](https://github.com/axboe/fio)
 -   [fio使用指南（最全的参数说明）](https://blog.csdn.net/sch0120/article/details/76154205)
+-   [CentOS 7升级gcc版本](https://www.likecs.com/show-205131329.html)
