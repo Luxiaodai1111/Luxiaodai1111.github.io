@@ -74,7 +74,7 @@ NOR 和 NAND 的起名就来源于其结构，分别对应逻辑门电路中的 
 
  ![](SSD原理及FTL算法/e4bd8770163d31e8ef23000169b50c13.jpg)
 
-下图是一个 8Gb 50nm 的SLC颗粒内部架构，一个 wordline 对应着一个或若干个 Page，取决于 SLC，MLC 或者 TLC。对 SLC 来说，一个 wordline 对应一个Page；MLC 则对应 2 个 Page，这两个 Page 是一对：Lower Page 和 Upper Page；TLC 对应 3 个 Page。
+下图是一个 8Gb 50nm 的 SLC 颗粒内部架构，一个 wordline 对应着一个或若干个 Page，取决于 SLC，MLC 或者 TLC。对 SLC 来说，一个 wordline 对应一个Page；MLC 则对应 2 个 Page，这两个 Page 是一对：Lower Page 和 Upper Page；TLC 对应 3 个 Page。
 
 每个 page 有 33,792 个单元，每个单元代表 1bit (SLC)，所以每个 page 就是 4096 Byte + 128 Byte（SA）。
 每个 Block 有 64 个 page 组成，所以每个 Block 容量为 262,114 Byte + 8192 Byte （SA）
