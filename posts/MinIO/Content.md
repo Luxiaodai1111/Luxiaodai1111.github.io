@@ -38,6 +38,10 @@ MinIO offers high-performance, S3 compatible object storage. Native to Kubernete
 >
 >   EC 模式对象读写基础流程分析
 
+>## [🏷️ 对象多版本、lock、retention、legal hold功能实现分析](posts/MinIO/源码分析/对象多版本实现分析.md)
+>
+>对象多版本、lock、retention、legal hold功能实现分析
+
 >   ## [🏷️ 故障恢复](posts/MinIO/源码分析/故障恢复.md)
 >
 >   EC 模式故障恢复
