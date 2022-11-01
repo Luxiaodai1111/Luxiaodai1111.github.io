@@ -8,6 +8,16 @@
 
 ---
 
+# 🚀 io_uring
+
+Linux 最新的异步 IO 模型，其实这些技术说是加速，其实就是针对旧架构无法跟上新设备的特性，从而适配出的更现代化的架构，不存在孰优孰劣，只是大家都在自己的时代里发光发热
+
+> ## 待研究
+
+
+
+---
+
 # 🚀 SPDK
 
 官网：https://spdk.io/
@@ -15,6 +25,8 @@
 The Storage Performance Development Kit (SPDK) provides a set of tools and libraries for writing high performance, scalable, user-mode storage applications.
 
 > ## 待研究
+
+
 
 ---
 
@@ -25,4 +37,3 @@ The Storage Performance Development Kit (SPDK) provides a set of tools and libra
 DPDK is the Data Plane Development Kit that consists of libraries to accelerate packet processing workloads running on a wide variety of CPU architectures.
 
 >   ## 待研究
-
