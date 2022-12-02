@@ -22,6 +22,8 @@
 
 [📄 In Search of an Understandable Consensus Algorithm (Extended Version)](posts/经典论文导读/Raft-extended.md)
 
+[📄 raft博士论文翻译](posts/经典论文导读/raft博士论文翻译.md)
+
 存储系统：
 
 [📄 The Google File System](posts/经典论文导读/GFS.md)
@@ -29,6 +31,8 @@
 [📄 Finding a needle in Haystack: Facebook’s photo storage](posts/经典论文导读/Haystack.md)
 
 [📄 f4: Facebook’s Warm BLOB Storage System](posts/经典论文导读/f4.md)
+
+[📄 Windows Azure Storage: A Highly Available Cloud Storage Service with Strong Consistency](posts/经典论文导读/Azure.md)
 
 
 
