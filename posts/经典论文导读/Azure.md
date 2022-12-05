@@ -149,7 +149,7 @@ WAS 提供了异地备份，因此什么龙卷风啊，地震啊，海啸啊，�
 
 WAS 的系统架构如图 1：
 
-![image-20221202141259841](Azure/image-20221202141259841.png)
+![](Azure/image-20221202141259841.png)
 
 >**Storage Stamps** – A storage stamp is a cluster of N racks of storage nodes, where each rack is built out as a separate fault domain with redundant networking and power. Clusters typically range from 10 to 20 racks with 18 disk-heavy storage nodes per rack. Our first generation storage stamps hold approximately 2PB of raw storage each. Our next generation stamps hold up to 30PB of raw storage each. 
 >
@@ -173,7 +173,7 @@ Location Service 会跟踪 storage stamps。当用户请求 WAS 数据时，Loca
 
 
 
-## Storage Stamp 分层
+## Storage Stamp 架构
 
 >Also shown in Figure 1 are the three layers within a storage stamp. From bottom up these are: 
 >
@@ -195,7 +195,7 @@ storage stamp 包括三层：
 
 
 
-## Two Replication Engines
+## 两种复制引擎
 
 >Before describing the stream and partition layers in detail, we first give a brief overview of the two replication engines in our system and their separate responsibilities. 
 
@@ -236,37 +236,92 @@ storage stamp 包括三层：
 
 # Stream Layer
 
+>The stream layer provides an internal interface used only by the partition layer. It provides a file system like namespace and API, except that all writes are append-only. It allows clients (the partition layer) to open, close, delete, rename, read, append to, and concatenate these large files, which are called streams. A stream is an ordered list of extent pointers, and an extent is a sequence of append blocks. 
 >
+>Figure 2 shows stream “//foo”, which contains (pointers to) four extents (E1, E2, E3, and E4). Each extent contains a set of blocks that were appended to it. E1, E2 and E3 are sealed extents. It means that they can no longer be appended to; only the last extent in a stream (E4) can be appended to. If an application reads the data of the stream from beginning to end, it would get the block contents of the extents in the order of E1, E2, E3 and E4. 
+
+Stream layer 提供了一些仅供 Partition layer 使用的内部接口。它相当于一个文件系统，只是所有的写都是追加操作（append-only）。partition layer 可以执行open，close，read，rename，append 等等操作，这些被称为流（stream），stream 就是一系列 extent 的指针，extent 就是一串顺序的追加块（block）
+
+我们可以看图 2，它是 “//foo” stream 的例子，这个 stream 包括了 4 个 extent (E1, E2, E3, and E4)。每个 extent 又包含了一系列追加的 block。E1，E2，E3 是封存的extent（sealed extents），表示它们不可以再继续追加数据了；E4 的状态是 unsealed 表示它还可以继续追加数据。
 
 
 
+![](Azure/image-20221205125723285.png)
+
+
+
+>In more detail these data concepts are: 
 >
-
-
-
+>**Block** – This is the minimum unit of data for writing and reading. A block can be up to N bytes (e.g. 4MB). Data is written (appended) as one or more concatenated blocks to an extent, where blocks do not have to be the same size. The client does an append in terms of blocks and controls the size of each block. A client read gives an offset to a stream or extent, and the stream layer reads as many blocks as needed at the offset to fulfill the length of the read. When performing a read, the entire contents of a block are read. This is because the stream layer stores its checksum validation at the block level, one checksum per block. The whole block is read to perform the checksum validation, and it is checked on every block read. In addition, all blocks in the system are validated against their checksums once every few days to check for data integrity issues. 
 >
-
-
-
+>**Extent** – Extents are the unit of replication in the stream layer, and the default replication policy is to keep three replicas within a storage stamp for an extent. Each extent is stored in an NTFS file and consists of a sequence of blocks. The target extent size used by the partition layer is 1GB. To store small objects, the partition layer appends many of them to the same extent and even in the same block; to store large TB-sized objects (Blobs), the object is broken up over many extents by the partition layer. The partition layer keeps track of what streams, extents, and byte offsets in the extents in which objects are stored as part of its index. 
 >
+>**Streams** – Every stream has a name in the hierarchical namespace maintained at the stream layer, and a stream looks like a big file to the partition layer. Streams are appended to and can be randomly read from. A stream is an ordered list of pointers to extents which is maintained by the Stream Manager. When the extents are concatenated together they represent the full contiguous address space in which the stream can be read in the order they were added to the stream. A new stream can be constructed by concatenating extents from existing streams, which is a fast operation since it just updates a list of pointers. Only the last extent in the stream can be appended to. All of the prior extents in the stream are immutable.
+
+**Block**：
+
+- 存储的读写最小单元，一个 Block 最大为固定的 N bytes（eg: 4MB）
+- 数据被写入是会被组织成一个 extent 上面的一个或多个 block（大小可不必相同）
+- 读取时可以在 stream 或 extent 的基础上给定 offset 读取数据，相关的每个 block 都会被完整的读取
+- 每个 block 都会有校验和（checksum）来保证数据正确性
+- 定期检查每个 block 的校验和，以保障数据的完整性与正确性
+
+**Extent**： 
+
+- Stream Layer 中复制备份的最小单元，默认的复制备份策略是在一个 stamp 存储中保持 Extent 的三备份
+- 每个 Extent 以 NTFS 文件系统的形式存储，由一系列 block 组成
+- 被 partition layer 使用的 Extent 大小是 1GB
+  - 因此在存储小对象时，Partition layer 会追加（append）到同一个 extent 里，甚至很多小对象在同一个 block 中
+  - 存储大对象时（TB-size Blobs），Partition 会将大对象分割成许多 extent
+
+**Stream:** 
+
+- stream 和 Stream layer 是两个不同的概念
+- 每个 stream 都在 Stream Layer 的层级的名字空间下（Hierarchical Namespace）下有自己的名字
+- 对于 Partition Layer 来说 stream 像是一个大的文件（由多个 extent 组成）
+- 每个 Stream 都有 Stream Manager 存储着有序的 Extent 的指针（ordered list of pointer to extents）。当多个 extent 被聚集合并（concatenate）到一起时,  他们则代表着连续的（逻辑）地址
+- stream 可以有现有其他 stream 或聚合（concatenate）extent 来快速生成，因为这仅仅涉及到更新 stream 的 extent 指针
+- 在 stream 中只有最后一个 extent 才能被追加写（append），其他先前的 extent 都不能被修改（immutable）
 
 
 
+## Stream Manager and Extent Nodes
+
+>The two main architecture components of the stream layer are the Stream Manager (SM) and Extent Node (EN) (shown in Figure 3).
+
+在 Stream Layer 中有两个重要的组件，即 Stream Manager(SM) 和 Extent Node(EN)，如下图所示
+
+
+
+![](Azure/image-20221205153544658.png)
+
+>**Stream Manager (SM)** – The SM keeps track of the stream namespace, what extents are in each stream, and the extent allocation across the Extent Nodes (EN). The SM is a standard Paxos cluster [13] as used in prior storage systems [3], and is off the critical path of client requests. The SM is responsible for (a) maintaining the stream namespace and state of all active streams and extents, (b) monitoring the health of the ENs, (c) creating and assigning extents to ENs, (d) performing the lazy re-replication of extent replicas that are lost due to hardware failures or unavailability, (e) garbage collecting extents that are no longer pointed to by any stream, and (f) scheduling the erasure coding of extent data according to stream policy (see Section 4.4). 
 >
-
-
-
+>The SM periodically polls (syncs) the state of the ENs and what extents they store. If the SM discovers that an extent is replicated on fewer than the expected number of ENs, a re-replication of the extent will lazily be created by the SM to regain the desired level of replication. For extent replica placement, the SM randomly chooses ENs across different fault domains, so that they are stored on nodes that will not have correlated failures due to power, network, or being on the same rack. 
 >
+>The SM does not know anything about blocks, just streams and extents. The SM is off the critical path of client requests and does not track each block append, since the total number of blocks can be huge and the SM cannot scale to track those. Since the stream and extent state is only tracked within a single stamp, the amount of state can be kept small enough to fit in the SM’s memory. The only client of the stream layer is the partition layer, and the partition layer and stream layer are co-designed so that they will not use more than 50 million extents and no more than 100,000 streams for a single storage stamp given our current stamp sizes. This parameterization can comfortably fit into 32GB of memory for the SM. 
 
 
 
->
+>**Extent Nodes (EN)** – Each extent node maintains the storage for a set of extent replicas assigned to it by the SM. An EN has N disks attached, which it completely controls for storing extent replicas and their blocks. An EN knows nothing about streams, and only deals with extents and blocks. Internally on an EN server, every extent on disk is a file, which holds data blocks and their checksums, and an index which maps extent offsets to blocks and their file location. Each extent node contains a view about the extents it owns and where the peer replicas are for a given extent. This view is a cache kept by the EN of the global state the SM keeps. ENs only talk to other ENs to replicate block writes (appends) sent by a client, or to create additional copies of an existing replica when told to by the SM. When an extent is no longer referenced by any stream, the SM garbage collects the extent and notifies the ENs to reclaim the space. 
 
 
 
->
 
 
+## Append Operation and Sealed Extent
+
+>Streams can only be appended to; existing data cannot be modified. The append operations are atomic: either the entire data block is appended, or nothing is. Multiple blocks can be appended at once, as a single atomic “multi-block append” operation. The minimum read size from a stream is a single block. The “multi-block append” operation allows us to write a large amount of sequential data in a single append and to later perform small reads. The contract used between the client (partition layer) and the stream layer is that the multi-block append will occur atomically, and if the client never hears back for a request (due to failure) the client should retry the request (or seal the extent). This contract implies that the client needs to expect the same block to be appended more than once in face of timeouts and correctly deal with processing duplicate records. The partition layer deals with duplicate records in two ways (see Section 5 for details on the partition layer streams). For the metadata and commit log streams, all of the transactions written have a sequence number and duplicate records will have the same sequence number. For the row data and blob data streams, for duplicate writes, only the last write will be pointed to by the RangePartition data structures, so the prior duplicate writes will have no references and will be garbage collected later.
+
+
+
+>An extent has a target size, specified by the client (partition layer), and when it fills up to that size the extent is sealed at a block boundary, and then a new extent is added to the stream and appends continue into that new extent. Once an extent is sealed it can no longer be appended to. A sealed extent is immutable, and the stream layer performs certain optimizations on sealed extents like erasure coding cold extents. Extents in a stream do not have to be the same size, and they can be sealed anytime and can even grow arbitrarily large. 
+
+
+
+
+
+## Stream Layer Intra-Stamp Replication
 
 >
 
