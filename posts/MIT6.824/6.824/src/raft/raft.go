@@ -31,7 +31,6 @@ import (
 	"6.824/labrpc"
 )
 
-//
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make(). set
@@ -41,7 +40,6 @@ import (
 // in part 2D you'll want to send other kinds of messages (e.g.,
 // snapshots) on the applyCh, but set CommandValid to false for these
 // other uses.
-//
 type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
@@ -459,9 +457,7 @@ func (rf *Raft) broadcast() {
 	return
 }
 
-//
 // A Go object implementing a single Raft peer.
-//
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
@@ -536,11 +532,9 @@ func (rf *Raft) GetState() (int, bool) {
 	return rf.currentTerm, isleader
 }
 
-//
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
-//
 func (rf *Raft) persist() {
 	//rf.DPrintf("persist currentTerm: %d, votedFor: %d", rf.currentTerm, rf.votedFor)
 	//rf.printLog()
@@ -557,9 +551,7 @@ func (rf *Raft) persist() {
 	rf.persister.SaveRaftState(data)
 }
 
-//
 // restore previously persisted state.
-//
 func (rf *Raft) readPersist(data []byte) {
 	rf.DPrintf("====== readPersist ======")
 	if data == nil || len(data) < 1 { // bootstrap without any state?
@@ -589,10 +581,8 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 }
 
-//
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
-//
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
 	// Your code here (2D).
@@ -645,9 +635,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.SaveStateAndSnapshot(snapshot)
 }
 
-//
 // example RequestVote RPC handler.
-//
 func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply) {
 	rf.Lock("RequestVote")
 	defer rf.Unlock("RequestVote")
@@ -756,7 +744,6 @@ func (rf *Raft) startElection() {
 	}
 }
 
-//
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -769,7 +756,6 @@ func (rf *Raft) startElection() {
 // if it's ever committed. the second return value is the current
 // term. the third return value is true if this server believes it is
 // the leader.
-//
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
@@ -802,7 +788,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, isLeader
 }
 
-//
 // the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
 // check whether Kill() has been called. the use of atomic avoids the
@@ -812,7 +797,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // up CPU time, perhaps causing later tests to fail and generating
 // confusing debug output. any goroutine with a long-running loop
 // should call killed() to check whether it should stop.
-//
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
@@ -835,8 +819,17 @@ func (rf *Raft) apply(ctx context.Context) {
 			rf.Lock("apply")
 			internalApplyList := make([]ApplyMsg, 0)
 			if len(rf.internalApplyList) > 0 {
-				// 取出要 apply 的快照
-				internalApplyList = append(internalApplyList, rf.internalApplyList...)
+				// 取出要 apply 的索引最大的快照
+				maxSnapshotIndex := 0
+				snapIndex := 0
+				for idx := range rf.internalApplyList {
+					if rf.internalApplyList[idx].SnapshotIndex > maxSnapshotIndex {
+						maxSnapshotIndex = rf.internalApplyList[idx].SnapshotIndex
+						snapIndex = idx
+					}
+				}
+				//internalApplyList = append(internalApplyList, rf.internalApplyList...)
+				internalApplyList = append(internalApplyList, rf.internalApplyList[snapIndex])
 				// 清空队列
 				rf.internalApplyList = make([]ApplyMsg, 0)
 			}
@@ -974,7 +967,6 @@ func (rf *Raft) election(ctx context.Context) {
 	}
 }
 
-//
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -984,7 +976,6 @@ func (rf *Raft) election(ctx context.Context) {
 // tester or service expects Raft to send ApplyMsg messages.
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
-//
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{
