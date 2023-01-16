@@ -1,13 +1,26 @@
 package kvraft
 
-import "6.824/labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"6.824/labrpc"
+	"crypto/rand"
+	"fmt"
+	"log"
+	"math/big"
+	"sync/atomic"
+)
 
+func (ck *Clerk) DPrintf(format string, a ...interface{}) {
+	if Debug {
+		log.Printf(fmt.Sprintf("[Clerk]:%s", format), a...)
+	}
+	return
+}
 
 type Clerk struct {
-	servers []*labrpc.ClientEnd
-	// You will have to modify this struct.
+	servers        []*labrpc.ClientEnd
+	leader         int   // leader 的地址
+	clientId       int64 // 客户端标识
+	maxSequenceNum int64 // 当前使用的最大命令序号
 }
 
 func nrand() int64 {
@@ -20,7 +33,9 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	// You'll have to add code here.
+	ck.leader = 0
+	ck.clientId = nrand()
+	ck.maxSequenceNum = 0
 	return ck
 }
 
@@ -37,9 +52,29 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
+	ck.DPrintf("request get key: %s", key)
 
-	// You will have to modify this function.
-	return ""
+	args := &GetArgs{
+		Key:         key,
+		ClientId:    ck.clientId,
+		SequenceNum: ck.maxSequenceNum,
+	}
+	atomic.AddInt64(&ck.maxSequenceNum, 1)
+
+	for {
+		reply := new(GetReply)
+		ok := ck.servers[ck.leader].Call("KVServer.Get", args, reply)
+		if ok {
+			if reply.Err == OK {
+				ck.DPrintf("get <%s>:<%s> success", key, reply.Value)
+				return reply.Value
+			} else if reply.Err == ErrNoKey {
+				ck.DPrintf("get <%s> failed: %s", key, ErrNoKey)
+				return ""
+			}
+		}
+		ck.leader = (ck.leader + 1) % len(ck.servers)
+	}
 }
 
 //
@@ -53,12 +88,34 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+	ck.DPrintf("request %s <%s>:<%s>", op, key, value)
+
+	args := &PutAppendArgs{
+		Key:         key,
+		Value:       value,
+		Op:          op,
+		ClientId:    ck.clientId,
+		SequenceNum: ck.maxSequenceNum,
+	}
+	atomic.AddInt64(&ck.maxSequenceNum, 1)
+
+	for {
+		reply := new(PutAppendReply)
+		ok := ck.servers[ck.leader].Call("KVServer.PutAppend", args, reply)
+		if ok {
+			if reply.Err == OK {
+				ck.DPrintf("%s <%s>:<%s> success", op, key, value)
+				return
+			}
+		}
+		ck.leader = (ck.leader + 1) % len(ck.servers)
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
 	ck.PutAppend(key, value, "Put")
 }
+
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
 }

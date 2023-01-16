@@ -10,7 +10,7 @@ func init() {
 }
 
 // Debugging
-const Debug = true
+const Debug = false
 
 func (rf *Raft) DPrintf(format string, a ...interface{}) {
 	if Debug {

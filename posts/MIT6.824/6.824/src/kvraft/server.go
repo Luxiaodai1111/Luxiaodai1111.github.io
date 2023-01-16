@@ -4,25 +4,38 @@ import (
 	"6.824/labgob"
 	"6.824/labrpc"
 	"6.824/raft"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
-const Debug = false
+const Debug = true
 
-func DPrintf(format string, a ...interface{}) (n int, err error) {
+func (kv *KVServer) DPrintf(format string, a ...interface{}) {
 	if Debug {
-		log.Printf(format, a...)
+		log.Printf(fmt.Sprintf("[KVServer %d]:%s", kv.me, format), a...)
 	}
 	return
 }
 
-
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	ClientId    int64  // 客户端标识
+	SequenceNum int64  // 请求序号
+	Op          string // "Put" or "Append" or "Get"
+	Key         string
+	Value       string
+}
+
+func (kv *KVServer) Lock(owner string) {
+	//kv.DPrintf("%s Lock", owner)
+	kv.mu.Lock()
+}
+
+func (kv *KVServer) Unlock(owner string) {
+	//kv.DPrintf("%s Unlock", owner)
+	kv.mu.Unlock()
 }
 
 type KVServer struct {
@@ -34,16 +47,96 @@ type KVServer struct {
 
 	maxraftstate int // snapshot if log grows this big
 
-	// Your definitions here.
+	db          map[string]string // 内存数据库
+	notifyChans map[int]chan Op   // 监听请求 apply
 }
 
-
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+	index, _, isLeader := kv.rf.Start(Op{
+		ClientId:    args.ClientId,
+		SequenceNum: args.SequenceNum,
+		Op:          OpGet,
+		Key:         args.Key,
+	})
+	if isLeader {
+		// TODO: ch 处理
+		kv.notifyChans[index] = make(chan Op)
+
+		select {
+		case result := <-kv.notifyChans[index]:
+			reply.Err = OK
+			kv.DPrintf("get <%s>:<%s>", result.Key, kv.db[result.Key])
+			reply.Value = kv.db[result.Key]
+		case <-time.After(ExecuteTimeout):
+			reply.Err = ErrTimeout
+		}
+		//close(kv.notifyChans[index])
+		//delete(kv.notifyChans, index)
+	} else {
+		reply.Err = ErrWrongLeader
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	index, _, isLeader := kv.rf.Start(Op{
+		ClientId:    args.ClientId,
+		SequenceNum: args.SequenceNum,
+		Op:          args.Op,
+		Key:         args.Key,
+		Value:       args.Value,
+	})
+	if isLeader {
+		// TODO: ch 处理
+		kv.notifyChans[index] = make(chan Op)
+
+		select {
+		case result := <-kv.notifyChans[index]:
+			// 更新状态机
+			_, ok := kv.db[result.Key]
+			if result.Op == OpAppend && ok {
+				kv.db[result.Key] += result.Value
+			} else {
+				kv.db[result.Key] = result.Value
+			}
+			kv.DPrintf("update <%s>:<%s>", result.Key, result.Value)
+			reply.Err = OK
+		case <-time.After(ExecuteTimeout):
+			reply.Err = ErrTimeout
+		}
+		//close(kv.notifyChans[index])
+		//delete(kv.notifyChans, index)
+	} else {
+		reply.Err = ErrWrongLeader
+	}
+}
+
+func (kv *KVServer) handleApply() {
+	for {
+		if kv.killed() {
+			return
+		}
+
+		select {
+		case applyLog := <-kv.applyCh:
+			if applyLog.SnapshotValid {
+				kv.DPrintf("recieve apply snap: %d", applyLog.SnapshotIndex)
+			} else {
+				kv.DPrintf("recieve apply log: %d", applyLog.CommandIndex)
+			}
+			op, ok := applyLog.Command.(Op)
+			if ok {
+				if applyLog.SnapshotValid {
+					kv.DPrintf("xxxxxxxxxxx TODO: handle snap")
+				} else {
+					kv.notifyChans[applyLog.CommandIndex] <- op
+				}
+			} else {
+				kv.DPrintf("recieved apply log's command error")
+			}
+		default:
+			continue
+		}
+	}
 }
 
 //
@@ -90,12 +183,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 
-	// You may need initialization code here.
-
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
-	// You may need initialization code here.
+	kv.db = make(map[string]string, 1024)
+	kv.notifyChans = make(map[int]chan Op, 1024)
+
+	go kv.handleApply() // 处理 raft apply
 
 	return kv
 }
