@@ -60,7 +60,7 @@ const (
 	Follower
 )
 
-const PlugNumber = 100
+const PlugNumber = 1
 
 type LogEntry struct {
 	Term         int         // 日志所属的任期
@@ -76,6 +76,15 @@ func (rf *Raft) Lock(owner string) {
 func (rf *Raft) Unlock(owner string) {
 	//rf.DPrintf("%s Unlock", owner)
 	rf.mu.Unlock()
+}
+
+// NeedSnapshot 供上层判断是否需要执行快照
+func (rf *Raft) NeedSnapshot(maxraftstate int) bool {
+	if maxraftstate != -1 && rf.persister.RaftStateSize()*100/maxraftstate >= 90 {
+		return true
+	}
+
+	return false
 }
 
 func (rf *Raft) InstallSnapshot(request *InstallSnapshotArgs, response *InstallSnapshotReply) {
@@ -165,6 +174,8 @@ func (rf *Raft) sendSnap(peer int) {
 		rf.matchIndex[peer] = request.LastSnapLog.CommandIndex
 		rf.nextIndex[peer] = rf.matchIndex[peer] + 1
 		rf.DPrintf("peer %d's matchIndex is %d", peer, rf.matchIndex[peer])
+		// 更新提交索引
+		rf.updateCommitIndex()
 
 		go rf.replicate(peer)
 	}
@@ -402,6 +413,8 @@ func (rf *Raft) replicate(peer int) {
 				rf.matchIndex[peer] = lastEntryIndex
 				rf.nextIndex[peer] = rf.matchIndex[peer] + 1
 				rf.DPrintf("peer %d's matchIndex is %d", peer, rf.matchIndex[peer])
+				// 更新提交索引
+				rf.updateCommitIndex()
 			}
 		} else {
 			var nextIndex int
@@ -783,7 +796,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			rf.plug = 0
 			rf.broadcast()
 		}
-		rf.updateCommitIndex()
 	}
 
 	return index, term, isLeader
@@ -910,8 +922,6 @@ func (rf *Raft) heartbeat() {
 	for rf.killed() == false {
 		rf.Lock("heartbeatTimer")
 		if rf.role == Leader {
-			// 更新提交索引
-			rf.updateCommitIndex()
 			// Leader 定期发送心跳
 			rf.broadcast()
 			rf.ResetElectionTimeout()

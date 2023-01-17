@@ -8,11 +8,13 @@ const (
 	ErrWrongLeader = "ErrWrongLeader"
 	ErrTimeout     = "ErrTimeout"
 
+	ErrApplySnap = "ErrApplySnap"
+
 	OpPut    = "Put"
 	OpAppend = "Append"
 	OpGet    = "Get"
 
-	ExecuteTimeout = time.Second
+	ExecuteTimeout = time.Millisecond * 500
 )
 
 type Err string

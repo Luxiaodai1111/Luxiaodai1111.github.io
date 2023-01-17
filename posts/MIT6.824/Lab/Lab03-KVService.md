@@ -114,6 +114,52 @@ ok  	6.824/kvraft	290.184s
 
 
 
+# Part B: Key/value service with snapshots
+
+目前的情况是，你的键/值服务器不调用你的 Raft 库的 Snapshot() 方法，所以重新启动的服务器必须重放完整的持久 Raft 日志以恢复它的状态。现在，您将使用 lab 2D 的 Snapshot() 来修改 kvserver，使其与 Raft 协作以节省日志空间，并减少重启时间。
+
+测试人员将 maxraftstate 传递给 StartKVServer()。maxraftstate 以字节表示持久 Raft 状态的最大允许大小（包括日志，但不包括快照）。您应该将 maxraftstate 与 persister.RaftStateSize() 进行比较。每当您的键/值服务器检测到 Raft 状态大小接近这个阈值时，它应该通过调用 Raft 的快照来保存快照。如果 maxraftstate 为 -1，则不必拍摄快照。maxraftstate 应用于 Raft 传递给 persister.SaveRaftState()
+
+实验任务：修改您的 kvserver，使其能够检测持续的 Raft 状态何时变得过大，然后将快照传递给 Raft。当 kvserver 服务器重新启动时，它应该从 persister 中读取快照，并从快照中恢复其状态。
+
+>[!TIP]
+>
+>- Think about when a kvserver should snapshot its state and what should be included in the snapshot. Raft stores each snapshot in the persister object using `SaveStateAndSnapshot()`, along with corresponding Raft state. You can read the latest stored snapshot using `ReadSnapshot()`.
+>- Your kvserver must be able to detect duplicated operations in the log across checkpoints, so any state you are using to detect them must be included in the snapshots.
+>- Capitalize all fields of structures stored in the snapshot.
+>- You may have bugs in your Raft library that this lab exposes. If you make changes to your Raft implementation make sure it continues to pass all of the Lab 2 tests.
+>- A reasonable amount of time to take for the Lab 3 tests is 400 seconds of real time and 700 seconds of CPU time. Further, `go test -run TestSnapshotSize` should take less than 20 seconds of real time.
+
+您的代码应该通过 3B 测试以及 3A 测试（并且您的 Raft 必须继续通过 lab2 测试）
+
+```bash
+$ go test -run 3B -race
+Test: InstallSnapshot RPC (3B) ...
+  ... Passed --   4.0  3   289   63
+Test: snapshot size is reasonable (3B) ...
+  ... Passed --   2.6  3  2418  800
+Test: ops complete fast enough (3B) ...
+  ... Passed --   3.2  3  3025    0
+Test: restarts, snapshots, one client (3B) ...
+  ... Passed --  21.9  5 29266 5820
+Test: restarts, snapshots, many clients (3B) ...
+  ... Passed --  21.5  5 33115 6420
+Test: unreliable net, snapshots, many clients (3B) ...
+  ... Passed --  17.4  5  3233  482
+Test: unreliable net, restarts, snapshots, many clients (3B) ...
+  ... Passed --  22.7  5  3337  471
+Test: unreliable net, restarts, partitions, snapshots, many clients (3B) ...
+  ... Passed --  30.4  5  2725  274
+Test: unreliable net, restarts, partitions, snapshots, random keys, many clients (3B) ...
+  ... Passed --  37.7  7  8378  681
+PASS
+ok  	6.824/kvraft	161.538s
+```
+
+
+
+
+
 
 
 ---
@@ -124,7 +170,7 @@ ok  	6.824/kvraft	290.184s
 
 raft 的博士毕业论文里对 client 的设计讲的会比较详细一些，首先它像之前一样列出了实现的 RPC：
 
-![](Lab03-KVService-Part2A/6_1.png)
+![](Lab03-KVService/6_1.png)
 
 客户端调用 ClientRequest RPC 来修改状态；他们调用 ClientQuery RPC 来查询状态。新的客户端使用 RegisterClient RPC 接收其客户端标识符。在该图中，非领导者的服务器将客户端重定向到领导者。
 
@@ -192,6 +238,16 @@ raft 的博士毕业论文里对 client 的设计讲的会比较详细一些，�
 2.  追加注册命令到日志，复制并提交
 3.  顺序 apply 日志，分配客户端 session
 4.  回复 OK，返回唯一标识符（可以使用日志索引号）
+
+
+
+## raft 速度问题
+
+之前实现的 raft 虽然正确性没问题，但是 apply 速度很慢，原因就在于提交慢了，后面调整了把 commitIndex 的更新时机调整到了复制日志成功后更新 matchIndex 时，这样更新会比较及时。
+
+另外 apply 索引排序也优化了下，之前简单使用了冒泡排序，不过测试下来好像没啥大影响；另外这里其实可以不用排序，交给上层去处理也是没问题的，我只是觉得排序了对上层逻辑更清晰简单一些。
+
+3A 的速度测试是一个请求一个请求的发，收到回复再发下一个，对于之前的设计，满足阈值的条目数会立刻发送，否则等待心跳发送日志，之前心跳设置的 100 ms，那么相当于一秒就复制 10 条日志，满足不了测试要求，因此调整阈值为 1 表示收到请求立即复制来满足测试要求。
 
 
 

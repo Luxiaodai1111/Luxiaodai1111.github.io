@@ -4,6 +4,7 @@ import (
 	"6.824/labgob"
 	"6.824/labrpc"
 	"6.824/raft"
+	"bytes"
 	"fmt"
 	"log"
 	"sync"
@@ -39,17 +40,20 @@ type KVServer struct {
 	applyCh chan raft.ApplyMsg
 	dead    int32 // set by Kill()
 
-	maxraftstate int // snapshot if log grows this big
+	maxraftstate   int // snapshot if log grows this big
+	lastApplyIndex int
 
-	db            map[string]string               // 内存数据库
-	notifyChans   map[int]chan *CommonReply       // 监听请求 apply
-	dupReqHistory map[int64]map[int64]CommonReply // 记录已经执行的命令，防止重复执行
+	db            map[string]string         // 内存数据库
+	notifyChans   map[int]chan *CommonReply // 监听请求 apply
+	dupReqHistory map[string]CommonReply    // 记录已经执行的命令，防止重复执行
 }
 
 func (kv *KVServer) Command(args *CommonArgs, reply *CommonReply) {
 	// 请求重复则直接返回之前执行的结果
 	if kv.isDuplicateRequest(args.ClientId, args.SequenceNum) {
-		replyHistory := kv.dupReqHistory[args.ClientId][args.SequenceNum]
+		kv.DPrintf("found duplicate request: %+v, reply history response", args)
+
+		replyHistory := kv.getDupReqHistory(args.ClientId, args.SequenceNum)
 		reply.Err, reply.Value = replyHistory.Err, replyHistory.Value
 		return
 	}
@@ -58,7 +62,7 @@ func (kv *KVServer) Command(args *CommonArgs, reply *CommonReply) {
 	 * 但是我们只要确保 index 有对应的通道即可，因为对于同一个 index，一定只会 apply 一次
 	 * 对于 apply 超时，我们也要关闭通道，因为重新选主之后，这个 index 的通道可能再也用不到了
 	 */
-	index, _, isLeader := kv.rf.Start(*args)
+	index, term, isLeader := kv.rf.Start(*args)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
@@ -72,18 +76,32 @@ func (kv *KVServer) Command(args *CommonArgs, reply *CommonReply) {
 
 	select {
 	case result := <-kv.notifyChans[index]:
-		reply.Err, reply.Value = result.Err, result.Value
+		currentTerm, isleader := kv.rf.GetState()
+		if !isleader || currentTerm != term {
+			reply.Err = ErrWrongLeader
+			kv.DPrintf("reply index: %d now is not leader", index)
+			return
+		}
+		kv.DPrintf("reply index: %d", index)
+
+		if reply.Err == ErrApplySnap {
+			reply.Err = OK
+			if args.Op == OpGet {
+				replyHistory := kv.getDupReqHistory(args.ClientId, args.SequenceNum)
+				reply.Err, reply.Value = replyHistory.Err, replyHistory.Value
+			}
+		} else {
+			reply.Err, reply.Value = result.Err, result.Value
+		}
 	case <-time.After(ExecuteTimeout):
 		kv.DPrintf("wait apply log %d time out", index)
 		reply.Err = ErrTimeout
 	}
 
-	go func() {
-		kv.Lock("Command")
-		defer kv.Unlock("Command")
-		close(kv.notifyChans[index])
-		delete(kv.notifyChans, index)
-	}()
+	kv.Lock("Command")
+	defer kv.Unlock("Command")
+	close(kv.notifyChans[index])
+	delete(kv.notifyChans, index)
 }
 
 func (kv *KVServer) Get(args *CommonArgs, reply *CommonReply) {
@@ -94,18 +112,27 @@ func (kv *KVServer) PutAppend(args *CommonArgs, reply *CommonReply) {
 	kv.Command(args, reply)
 }
 
+func (kv *KVServer) getDupReqKey(clientId, sequenceNum int64) string {
+	return fmt.Sprintf("%d-%d", clientId, sequenceNum)
+}
+
+func (kv *KVServer) getDupReqHistory(clientId, sequenceNum int64) CommonReply {
+	kv.Lock("getDupReqHistory")
+	defer kv.Unlock("getDupReqHistory")
+	return kv.dupReqHistory[kv.getDupReqKey(clientId, sequenceNum)]
+}
+
 func (kv *KVServer) updateDupReqHistory(clientId, sequenceNum int64, result CommonReply) {
-	if _, ok := kv.dupReqHistory[clientId]; !ok {
-		kv.dupReqHistory[clientId] = make(map[int64]CommonReply)
-	}
-	kv.dupReqHistory[clientId][sequenceNum] = result
+	kv.Lock("updateDupReqHistory")
+	defer kv.Unlock("updateDupReqHistory")
+	kv.dupReqHistory[kv.getDupReqKey(clientId, sequenceNum)] = result
 }
 
 func (kv *KVServer) isDuplicateRequest(clientId, sequenceNum int64) bool {
-	if _, ok := kv.dupReqHistory[clientId]; ok {
-		if _, ok := kv.dupReqHistory[clientId][sequenceNum]; ok {
-			return true
-		}
+	kv.Lock("isDuplicateRequest")
+	defer kv.Unlock("isDuplicateRequest")
+	if _, ok := kv.dupReqHistory[kv.getDupReqKey(clientId, sequenceNum)]; ok {
+		return true
 	}
 
 	return false
@@ -118,12 +145,20 @@ func (kv *KVServer) handleApply() {
 			if applyLog.CommandValid {
 				op, ok := applyLog.Command.(Op)
 				if !ok {
-					panic("recieved apply log's command error")
+					kv.DPrintf("[panic] recieved apply log's command error")
+					kv.Kill()
+					return
 				}
 
 				reply := &CommonReply{
 					Err: OK,
 				}
+
+				if applyLog.CommandIndex <= kv.lastApplyIndex {
+					kv.DPrintf("command index %d is older than lastApplyIndex %d", applyLog.SnapshotIndex, kv.lastApplyIndex)
+					continue
+				}
+				kv.lastApplyIndex = applyLog.CommandIndex
 
 				kv.DPrintf("recieve apply log: %d, op info: %+v", applyLog.CommandIndex, op)
 				// 防止重复应用同一条命令
@@ -132,6 +167,7 @@ func (kv *KVServer) handleApply() {
 					continue
 				}
 
+				// 更新状态机
 				value, ok := kv.db[op.Key]
 				if op.Op == OpGet {
 					if ok {
@@ -150,24 +186,71 @@ func (kv *KVServer) handleApply() {
 				}
 				kv.updateDupReqHistory(op.ClientId, op.SequenceNum, *reply)
 
-				go func() {
-					// 只有 leader 需要回复
-					_, isleader := kv.rf.GetState()
-					if !isleader {
+				/*
+				 * 只要有通道存在，说明可能是当前 leader，也可能曾经作为 leader 接收过请求
+				 * 通道可能处于等待消息状态，或者正在返回错误等待销毁，所以不管怎么样，都往通道里返回消息
+				 * 如果已经销毁，说明已经返回了等待超时错误
+				 */
+				kv.Lock("replyCommand")
+				if _, ok := kv.notifyChans[applyLog.CommandIndex]; ok {
+					kv.notifyChans[applyLog.CommandIndex] <- reply
+				}
+				kv.Unlock("replyCommand")
+
+				// 检测是否需要执行快照
+				if kv.rf.NeedSnapshot(kv.maxraftstate) {
+					kv.DPrintf("======== snapshot %d ========", applyLog.CommandIndex)
+					w := new(bytes.Buffer)
+					e := labgob.NewEncoder(w)
+					kv.Lock("snap")
+					if e.Encode(kv.db) != nil || e.Encode(kv.dupReqHistory) != nil {
+						kv.DPrintf("[panic] encode snap error")
+						kv.Unlock("snap")
+						kv.Kill()
 						return
 					}
+					kv.Unlock("snap")
+					data := w.Bytes()
+					kv.rf.Snapshot(applyLog.CommandIndex, data)
+				}
+			} else if applyLog.SnapshotValid {
+				kv.DPrintf("======== recieve apply snap: %d ========", applyLog.SnapshotIndex)
+				if applyLog.SnapshotIndex <= kv.lastApplyIndex {
+					kv.DPrintf("snap index %d is older than lastApplyIndex %d", applyLog.SnapshotIndex, kv.lastApplyIndex)
+					continue
+				}
 
-					kv.Lock("Command")
+				r := bytes.NewBuffer(applyLog.Snapshot)
+				d := labgob.NewDecoder(r)
+				kv.Lock("applySnap")
+				kv.db = make(map[string]string)
+				kv.dupReqHistory = make(map[string]CommonReply)
+				if d.Decode(&kv.db) != nil || d.Decode(&kv.dupReqHistory) != nil {
+					kv.DPrintf("[panic] decode snap error")
+					kv.Unlock("applySnap")
+					kv.Kill()
+					return
+				}
+				kv.Unlock("applySnap")
+
+				// 之前 apply 到快照之间的请求一定会包含在查重哈希表里
+				// 对于还在等待的客户端请求需要向通道发送消息来告知结果
+				// 如果是 Put 请求，可以直接认为成功了，而 Get 请求则去历史里拿
+				kv.Lock("replyCommand")
+				reply := &CommonReply{
+					Err: ErrApplySnap,
+				}
+				for idx := kv.lastApplyIndex; idx <= applyLog.SnapshotIndex; idx++ {
 					if _, ok := kv.notifyChans[applyLog.CommandIndex]; ok {
 						kv.notifyChans[applyLog.CommandIndex] <- reply
 					}
-					kv.Unlock("Command")
-				}()
-			} else if applyLog.SnapshotValid {
-				kv.DPrintf("recieve apply snap: %d", applyLog.SnapshotIndex)
-				kv.DPrintf("xxxxxxxxxxx TODO: handle snap")
+				}
+				kv.Unlock("replyCommand")
+				kv.lastApplyIndex = applyLog.SnapshotIndex
 			} else {
-				panic(fmt.Sprintf("unexpected applyLog %v", applyLog))
+				kv.DPrintf(fmt.Sprintf("[panic] unexpected applyLog %v", applyLog))
+				kv.Kill()
+				return
 			}
 		default:
 			continue
@@ -218,13 +301,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
+	kv.lastApplyIndex = 0
 
-	kv.applyCh = make(chan raft.ApplyMsg, 1024)
+	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
-	kv.db = make(map[string]string, 1024)
-	kv.notifyChans = make(map[int]chan *CommonReply, 1024)
-	kv.dupReqHistory = make(map[int64]map[int64]CommonReply)
+	kv.db = make(map[string]string)
+	kv.notifyChans = make(map[int]chan *CommonReply)
+	kv.dupReqHistory = make(map[string]CommonReply)
 
 	go kv.handleApply() // 处理 raft apply
 

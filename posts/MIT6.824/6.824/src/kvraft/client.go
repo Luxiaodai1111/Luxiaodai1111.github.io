@@ -52,7 +52,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-	ck.DPrintf("request get key: %s", key)
+	ck.DPrintf("=== request get key: %s ===", key)
 
 	args := &CommonArgs{
 		Key:         key,
@@ -62,19 +62,26 @@ func (ck *Clerk) Get(key string) string {
 	}
 	atomic.AddInt64(&ck.maxSequenceNum, 1)
 
+	leader := ck.leader
 	for {
 		reply := new(CommonReply)
-		ok := ck.servers[ck.leader].Call("KVServer.Get", args, reply)
+		ok := ck.servers[leader].Call("KVServer.Get", args, reply)
 		if ok {
 			if reply.Err == OK {
-				ck.DPrintf("get <%s>:<%s> success", key, reply.Value)
+				ck.DPrintf("=== get <%s>:<%s> from leader %d success ===", key, reply.Value, leader)
+				ck.leader = leader
 				return reply.Value
 			} else if reply.Err == ErrNoKey {
-				ck.DPrintf("get <%s> from leader failed: %s", key, ck.leader, ErrNoKey)
+				ck.leader = leader
+				ck.DPrintf("get <%s> from leader %d failed: %s", key, leader, ErrNoKey)
 				return ""
+			} else if reply.Err == ErrApplySnap {
+				ck.DPrintf("revieve %s, retry get <%s> from leader %d", ErrApplySnap, key, leader)
+				continue
 			}
 		}
-		ck.leader = (ck.leader + 1) % len(ck.servers)
+		leader = (leader + 1) % len(ck.servers)
+		ck.DPrintf("retry get <%s> from leader %d", key, leader)
 	}
 }
 
@@ -89,7 +96,7 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	ck.DPrintf("request %s <%s>:<%s>", op, key, value)
+	ck.DPrintf("=== request %s <%s>:<%s> ===", op, key, value)
 
 	args := &CommonArgs{
 		Key:         key,
@@ -100,17 +107,20 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	}
 	atomic.AddInt64(&ck.maxSequenceNum, 1)
 
+	leader := ck.leader
 	for {
 		reply := new(CommonReply)
-		ok := ck.servers[ck.leader].Call("KVServer.PutAppend", args, reply)
+		ok := ck.servers[leader].Call("KVServer.PutAppend", args, reply)
 		if ok {
 			if reply.Err == OK {
-				ck.DPrintf("%s <%s>:<%s> success", op, key, value)
+				ck.DPrintf("=== %s <%s>:<%s> to leader %d success ===", op, key, value, leader)
+				ck.leader = leader
 				return
 			}
-			ck.DPrintf("%s <%s>:<%s> to leader %d failed: %s", op, key, value, ck.leader, reply.Err)
+			ck.DPrintf("%s <%s>:<%s> to leader %d failed: %s", op, key, value, leader, reply.Err)
 		}
-		ck.leader = (ck.leader + 1) % len(ck.servers)
+		leader = (leader + 1) % len(ck.servers)
+		ck.DPrintf("retry %s <%s>:<%s> to leader %d", op, key, value, leader)
 	}
 }
 
