@@ -20,13 +20,7 @@ func (kv *KVServer) DPrintf(format string, a ...interface{}) {
 	return
 }
 
-type Op struct {
-	ClientId    int64  // 客户端标识
-	SequenceNum int64  // 请求序号
-	Op          string // "Put" or "Append" or "Get"
-	Key         string
-	Value       string
-}
+type Op = CommonArgs
 
 func (kv *KVServer) Lock(owner string) {
 	//kv.DPrintf("%s Lock", owner)
@@ -47,91 +41,133 @@ type KVServer struct {
 
 	maxraftstate int // snapshot if log grows this big
 
-	db          map[string]string // 内存数据库
-	notifyChans map[int]chan Op   // 监听请求 apply
+	db            map[string]string               // 内存数据库
+	notifyChans   map[int]chan *CommonReply       // 监听请求 apply
+	dupReqHistory map[int64]map[int64]CommonReply // 记录已经执行的命令，防止重复执行
 }
 
-func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	index, _, isLeader := kv.rf.Start(Op{
-		ClientId:    args.ClientId,
-		SequenceNum: args.SequenceNum,
-		Op:          OpGet,
-		Key:         args.Key,
-	})
-	if isLeader {
-		// TODO: ch 处理
-		kv.notifyChans[index] = make(chan Op)
-
-		select {
-		case result := <-kv.notifyChans[index]:
-			reply.Err = OK
-			kv.DPrintf("get <%s>:<%s>", result.Key, kv.db[result.Key])
-			reply.Value = kv.db[result.Key]
-		case <-time.After(ExecuteTimeout):
-			reply.Err = ErrTimeout
-		}
-		//close(kv.notifyChans[index])
-		//delete(kv.notifyChans, index)
-	} else {
-		reply.Err = ErrWrongLeader
+func (kv *KVServer) Command(args *CommonArgs, reply *CommonReply) {
+	// 请求重复则直接返回之前执行的结果
+	if kv.isDuplicateRequest(args.ClientId, args.SequenceNum) {
+		replyHistory := kv.dupReqHistory[args.ClientId][args.SequenceNum]
+		reply.Err, reply.Value = replyHistory.Err, replyHistory.Value
+		return
 	}
+	/*
+	 * 如果 raft 崩溃了，那么 index 是可能回退的，因为它并不代表已提交
+	 * 但是我们只要确保 index 有对应的通道即可，因为对于同一个 index，一定只会 apply 一次
+	 * 对于 apply 超时，我们也要关闭通道，因为重新选主之后，这个 index 的通道可能再也用不到了
+	 */
+	index, _, isLeader := kv.rf.Start(*args)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	kv.Lock("Command")
+	if _, ok := kv.notifyChans[index]; !ok {
+		kv.notifyChans[index] = make(chan *CommonReply)
+	}
+	kv.Unlock("Command")
+
+	select {
+	case result := <-kv.notifyChans[index]:
+		reply.Err, reply.Value = result.Err, result.Value
+	case <-time.After(ExecuteTimeout):
+		kv.DPrintf("wait apply log %d time out", index)
+		reply.Err = ErrTimeout
+	}
+
+	go func() {
+		kv.Lock("Command")
+		defer kv.Unlock("Command")
+		close(kv.notifyChans[index])
+		delete(kv.notifyChans, index)
+	}()
 }
 
-func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	index, _, isLeader := kv.rf.Start(Op{
-		ClientId:    args.ClientId,
-		SequenceNum: args.SequenceNum,
-		Op:          args.Op,
-		Key:         args.Key,
-		Value:       args.Value,
-	})
-	if isLeader {
-		// TODO: ch 处理
-		kv.notifyChans[index] = make(chan Op)
+func (kv *KVServer) Get(args *CommonArgs, reply *CommonReply) {
+	kv.Command(args, reply)
+}
 
-		select {
-		case result := <-kv.notifyChans[index]:
-			// 更新状态机
-			_, ok := kv.db[result.Key]
-			if result.Op == OpAppend && ok {
-				kv.db[result.Key] += result.Value
-			} else {
-				kv.db[result.Key] = result.Value
-			}
-			kv.DPrintf("update <%s>:<%s>", result.Key, result.Value)
-			reply.Err = OK
-		case <-time.After(ExecuteTimeout):
-			reply.Err = ErrTimeout
-		}
-		//close(kv.notifyChans[index])
-		//delete(kv.notifyChans, index)
-	} else {
-		reply.Err = ErrWrongLeader
+func (kv *KVServer) PutAppend(args *CommonArgs, reply *CommonReply) {
+	kv.Command(args, reply)
+}
+
+func (kv *KVServer) updateDupReqHistory(clientId, sequenceNum int64, result CommonReply) {
+	if _, ok := kv.dupReqHistory[clientId]; !ok {
+		kv.dupReqHistory[clientId] = make(map[int64]CommonReply)
 	}
+	kv.dupReqHistory[clientId][sequenceNum] = result
+}
+
+func (kv *KVServer) isDuplicateRequest(clientId, sequenceNum int64) bool {
+	if _, ok := kv.dupReqHistory[clientId]; ok {
+		if _, ok := kv.dupReqHistory[clientId][sequenceNum]; ok {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (kv *KVServer) handleApply() {
-	for {
-		if kv.killed() {
-			return
-		}
-
+	for kv.killed() == false {
 		select {
 		case applyLog := <-kv.applyCh:
-			if applyLog.SnapshotValid {
-				kv.DPrintf("recieve apply snap: %d", applyLog.SnapshotIndex)
-			} else {
-				kv.DPrintf("recieve apply log: %d", applyLog.CommandIndex)
-			}
-			op, ok := applyLog.Command.(Op)
-			if ok {
-				if applyLog.SnapshotValid {
-					kv.DPrintf("xxxxxxxxxxx TODO: handle snap")
-				} else {
-					kv.notifyChans[applyLog.CommandIndex] <- op
+			if applyLog.CommandValid {
+				op, ok := applyLog.Command.(Op)
+				if !ok {
+					panic("recieved apply log's command error")
 				}
+
+				reply := &CommonReply{
+					Err: OK,
+				}
+
+				kv.DPrintf("recieve apply log: %d, op info: %+v", applyLog.CommandIndex, op)
+				// 防止重复应用同一条命令
+				if kv.isDuplicateRequest(op.ClientId, op.SequenceNum) {
+					kv.DPrintf("found duplicate request: %+v", op)
+					continue
+				}
+
+				value, ok := kv.db[op.Key]
+				if op.Op == OpGet {
+					if ok {
+						reply.Value = value
+						kv.DPrintf("get <%s>:<%s>", op.Key, value)
+					} else {
+						reply.Err = ErrNoKey
+					}
+				} else {
+					if op.Op == OpAppend && ok {
+						kv.db[op.Key] += op.Value
+					} else {
+						kv.db[op.Key] = op.Value
+					}
+					kv.DPrintf("update <%s>:<%s>", op.Key, kv.db[op.Key])
+				}
+				kv.updateDupReqHistory(op.ClientId, op.SequenceNum, *reply)
+
+				go func() {
+					// 只有 leader 需要回复
+					_, isleader := kv.rf.GetState()
+					if !isleader {
+						return
+					}
+
+					kv.Lock("Command")
+					if _, ok := kv.notifyChans[applyLog.CommandIndex]; ok {
+						kv.notifyChans[applyLog.CommandIndex] <- reply
+					}
+					kv.Unlock("Command")
+				}()
+			} else if applyLog.SnapshotValid {
+				kv.DPrintf("recieve apply snap: %d", applyLog.SnapshotIndex)
+				kv.DPrintf("xxxxxxxxxxx TODO: handle snap")
 			} else {
-				kv.DPrintf("recieved apply log's command error")
+				panic(fmt.Sprintf("unexpected applyLog %v", applyLog))
 			}
 		default:
 			continue
@@ -183,11 +219,12 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 
-	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.applyCh = make(chan raft.ApplyMsg, 1024)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	kv.db = make(map[string]string, 1024)
-	kv.notifyChans = make(map[int]chan Op, 1024)
+	kv.notifyChans = make(map[int]chan *CommonReply, 1024)
+	kv.dupReqHistory = make(map[int64]map[int64]CommonReply)
 
 	go kv.handleApply() // 处理 raft apply
 

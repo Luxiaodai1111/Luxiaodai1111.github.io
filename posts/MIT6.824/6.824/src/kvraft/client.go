@@ -54,22 +54,23 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 	ck.DPrintf("request get key: %s", key)
 
-	args := &GetArgs{
+	args := &CommonArgs{
 		Key:         key,
+		Op:          OpGet,
 		ClientId:    ck.clientId,
 		SequenceNum: ck.maxSequenceNum,
 	}
 	atomic.AddInt64(&ck.maxSequenceNum, 1)
 
 	for {
-		reply := new(GetReply)
+		reply := new(CommonReply)
 		ok := ck.servers[ck.leader].Call("KVServer.Get", args, reply)
 		if ok {
 			if reply.Err == OK {
 				ck.DPrintf("get <%s>:<%s> success", key, reply.Value)
 				return reply.Value
 			} else if reply.Err == ErrNoKey {
-				ck.DPrintf("get <%s> failed: %s", key, ErrNoKey)
+				ck.DPrintf("get <%s> from leader failed: %s", key, ck.leader, ErrNoKey)
 				return ""
 			}
 		}
@@ -90,7 +91,7 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	ck.DPrintf("request %s <%s>:<%s>", op, key, value)
 
-	args := &PutAppendArgs{
+	args := &CommonArgs{
 		Key:         key,
 		Value:       value,
 		Op:          op,
@@ -100,13 +101,14 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	atomic.AddInt64(&ck.maxSequenceNum, 1)
 
 	for {
-		reply := new(PutAppendReply)
+		reply := new(CommonReply)
 		ok := ck.servers[ck.leader].Call("KVServer.PutAppend", args, reply)
 		if ok {
 			if reply.Err == OK {
 				ck.DPrintf("%s <%s>:<%s> success", op, key, value)
 				return
 			}
+			ck.DPrintf("%s <%s>:<%s> to leader %d failed: %s", op, key, value, ck.leader, reply.Err)
 		}
 		ck.leader = (ck.leader + 1) % len(ck.servers)
 	}

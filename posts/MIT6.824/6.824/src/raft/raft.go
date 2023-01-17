@@ -783,6 +783,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			rf.plug = 0
 			rf.broadcast()
 		}
+		rf.updateCommitIndex()
 	}
 
 	return index, term, isLeader
@@ -818,10 +819,10 @@ func (rf *Raft) apply(ctx context.Context) {
 			// 先把要提交的日志整合出来，避免占用锁
 			rf.Lock("apply")
 			internalApplyList := make([]ApplyMsg, 0)
+			snapIndex := -1
 			if len(rf.internalApplyList) > 0 {
 				// 取出要 apply 的索引最大的快照
 				maxSnapshotIndex := 0
-				snapIndex := 0
 				for idx := range rf.internalApplyList {
 					if rf.internalApplyList[idx].SnapshotIndex > maxSnapshotIndex {
 						maxSnapshotIndex = rf.internalApplyList[idx].SnapshotIndex
@@ -834,7 +835,11 @@ func (rf *Raft) apply(ctx context.Context) {
 				rf.internalApplyList = make([]ApplyMsg, 0)
 			}
 			if rf.lastApplied >= rf.logs[0].CommandIndex {
-				for idx := rf.lastApplied + 1; idx <= rf.commitIndex; idx++ {
+				startIndex := rf.lastApplied + 1
+				if snapIndex > startIndex {
+					startIndex = snapIndex
+				}
+				for idx := startIndex; idx <= rf.commitIndex; idx++ {
 					internalApplyList = append(internalApplyList, ApplyMsg{
 						CommandValid: true,
 						Command:      rf.log(idx).Command,
@@ -843,25 +848,6 @@ func (rf *Raft) apply(ctx context.Context) {
 				}
 			}
 			rf.Unlock("apply")
-
-			// 对 internalApplyList 按日志索引排序
-			for i := 0; i <= len(internalApplyList)-1; i++ {
-				for j := i; j <= len(internalApplyList)-1; j++ {
-					x := internalApplyList[i].CommandIndex
-					if internalApplyList[i].SnapshotValid {
-						x = internalApplyList[i].SnapshotIndex
-					}
-					y := internalApplyList[j].CommandIndex
-					if internalApplyList[j].SnapshotValid {
-						y = internalApplyList[j].SnapshotIndex
-					}
-					if x > y {
-						t := internalApplyList[i]
-						internalApplyList[i] = internalApplyList[j]
-						internalApplyList[j] = t
-					}
-				}
-			}
 
 			for _, applyMsg := range internalApplyList {
 				if (applyMsg.CommandValid && applyMsg.CommandIndex > rf.lastApplied) ||
@@ -902,7 +888,7 @@ func (rf *Raft) commitCheck(commitIndex int) bool {
 	return false
 }
 
-func (rf *Raft) commitLog() {
+func (rf *Raft) updateCommitIndex() {
 	low := rf.commitIndex + 1
 	high := rf.getLastLog().CommandIndex
 	if low > high {
@@ -925,7 +911,7 @@ func (rf *Raft) heartbeat() {
 		rf.Lock("heartbeatTimer")
 		if rf.role == Leader {
 			// 更新提交索引
-			rf.commitLog()
+			rf.updateCommitIndex()
 			// Leader 定期发送心跳
 			rf.broadcast()
 			rf.ResetElectionTimeout()
