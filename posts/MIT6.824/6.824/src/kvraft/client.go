@@ -75,9 +75,6 @@ func (ck *Clerk) Get(key string) string {
 				ck.leader = leader
 				ck.DPrintf("get <%s> from leader %d failed: %s", key, leader, ErrNoKey)
 				return ""
-			} else if reply.Err == ErrApplySnap {
-				ck.DPrintf("revieve %s, retry get <%s> from leader %d", ErrApplySnap, key, leader)
-				continue
 			}
 		}
 		leader = (leader + 1) % len(ck.servers)

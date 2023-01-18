@@ -924,6 +924,7 @@ func (rf *Raft) heartbeat() {
 		if rf.role == Leader {
 			// Leader 定期发送心跳
 			rf.broadcast()
+			rf.updateCommitIndex()
 			rf.ResetElectionTimeout()
 		}
 		rf.Unlock("heartbeatTimer")

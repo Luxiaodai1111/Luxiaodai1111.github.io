@@ -8,7 +8,7 @@ const (
 	ErrWrongLeader = "ErrWrongLeader"
 	ErrTimeout     = "ErrTimeout"
 
-	ErrApplySnap = "ErrApplySnap"
+	ApplySnap = "ApplySnap"
 
 	OpPut    = "Put"
 	OpAppend = "Append"
