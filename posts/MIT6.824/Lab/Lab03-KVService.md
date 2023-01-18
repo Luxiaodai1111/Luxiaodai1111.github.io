@@ -251,5 +251,7 @@ raft 的博士毕业论文里对 client 的设计讲的会比较详细一些，�
 
 
 
+## lab02 的 bug
 
+在做 lab03 时，发现 lab02 的快照实现有点问题，主要是在 recover 时，lastApplied 设置为了第一条日志的索引，实际上已提交不代表已应用，所以 lastApplied 应该从 0 开始，如果有快照，还要重新 apply 快照。
 

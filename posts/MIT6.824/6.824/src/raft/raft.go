@@ -586,11 +586,23 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.logs = logs
-		// logs 第一条日志一定是已经提交和应用了的
-		rf.lastApplied = rf.logs[0].CommandIndex
-		rf.commitIndex = rf.lastApplied
+		// logs 第一条日志一定是已经提交的，但是不一定 apply 成功了，所以 rf.lastApplied 需要从零开始
+		rf.commitIndex = rf.logs[0].CommandIndex
 		rf.DPrintf("====== readPersist currentTerm: %d, votedFor: %d ======", rf.currentTerm, rf.votedFor)
 		rf.printLog()
+		if rf.commitIndex > 0 {
+			// 表示有快照，需要重新 apply 快照
+			snap := rf.persister.ReadSnapshot()
+			rf.internalApplyList = append(rf.internalApplyList, ApplyMsg{
+				CommandValid:  false,
+				Command:       nil,
+				CommandIndex:  0,
+				SnapshotValid: true,
+				Snapshot:      snap,
+				SnapshotTerm:  rf.logs[0].Term,
+				SnapshotIndex: rf.logs[0].CommandIndex,
+			})
+		}
 	}
 }
 
@@ -846,11 +858,12 @@ func (rf *Raft) apply(ctx context.Context) {
 				// 清空队列
 				rf.internalApplyList = make([]ApplyMsg, 0)
 			}
-			if rf.lastApplied >= rf.logs[0].CommandIndex {
-				startIndex := rf.lastApplied + 1
-				if snapIndex > startIndex {
-					startIndex = snapIndex
-				}
+
+			startIndex := rf.lastApplied + 1
+			if snapIndex > startIndex {
+				startIndex = snapIndex
+			}
+			if startIndex >= rf.logs[0].CommandIndex {
 				for idx := startIndex; idx <= rf.commitIndex; idx++ {
 					internalApplyList = append(internalApplyList, ApplyMsg{
 						CommandValid: true,
@@ -935,7 +948,6 @@ func (rf *Raft) heartbeat() {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) election(ctx context.Context) {
-	rf.ResetElectionTimeout()
 	for rf.killed() == false {
 		select {
 		case <-rf.electionTimer.C:
@@ -1002,6 +1014,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.cancel = cancel
 
 	// start ticker goroutine to start elections
+	rf.ResetElectionTimeout()
 	go rf.election(ctx)
 	go rf.heartbeat()
 

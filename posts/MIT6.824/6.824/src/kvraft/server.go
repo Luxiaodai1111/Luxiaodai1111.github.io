@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const Debug = true
+const Debug = false
 
 func (kv *KVServer) DPrintf(format string, a ...interface{}) {
 	if Debug {
@@ -314,8 +314,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	kv.db = make(map[string]string)
-	kv.notifyChans = make(map[int]chan *CommonReply, 1024)
-	kv.dupReqHistory = make(map[string]CommonReply, 1024)
+	kv.notifyChans = make(map[int]chan *CommonReply)
+	kv.dupReqHistory = make(map[string]CommonReply)
 
 	go kv.handleApply() // 处理 raft apply
 
