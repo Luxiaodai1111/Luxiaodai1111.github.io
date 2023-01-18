@@ -7,6 +7,7 @@ const (
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongLeader = "ErrWrongLeader"
 	ErrTimeout     = "ErrTimeout"
+	ErrRetry       = "ErrRetry"
 
 	ApplySnap = "ApplySnap"
 
