@@ -22,7 +22,7 @@
 
 # Getting Started
 
-我们在 src/kvraft 中为你提供了骨架代码和测试。你将需要修改 kvraft/client.go，kvraft/server.go，也许还有 kvraft/common.go。
+我们在 src/kvraft 中为你提供了框架代码和测试。你将需要修改 kvraft/client.go，kvraft/server.go，也许还有 kvraft/common.go。
 
 为了启动和运行，执行以下命令。
 
@@ -46,11 +46,13 @@ $
 
 你的每个键/值服务器（"kvservers"）将有一个相关的 Raft peer。Clerks 将 Put、Append 和 Get RPCs 发送到 Raft Leader 的 kvserver。kvserver 代码将 Put/Append/Get 操作提交给 Raft，这样 Raft 日志就持有一连串的 Put/Append/Get 操作。所有的 kvserver 按顺序执行 Raft 日志中的操作，将这些操作应用到他们的键/值数据库中；目的是让服务器保持相同的键/值数据库副本。
 
-Clerk 有时不知道哪个 kvserver 是 Raft 的领导者。如果 Clerk 向错误的 kvserver 发送 RPC，或者无法到达该 kvserver，Clerk 应该通过向不同的 kvserver 发送来重新尝试。如果键/值服务将操作提交给它的 Raft 日志（并因此将操作应用于键/值状态机），领导者通过响应它的 RPC 将结果报告给 Clerk。如果操作未能提交（例如，如果领导者被替换了），服务器会报告一个错误，Clerk 会用另一个服务器重试。
+Clerk 有时不知道哪个 kvserver 是 Raft 的 leader。如果 Clerk 向错误的 kvserver 发送 RPC，或者无法到达该 kvserver，Clerk 应该重新尝试不同的 kvserver。如果键/值服务将操作提交给它的 Raft 日志（并因此将操作应用于键/值状态机），Leader 通过响应它的 RPC 将结果报告给 Clerk。如果操作未能提交，服务器会报告一个错误，Clerk 会用另一个服务器重试。
 
-你的 kvservers 不应该直接交流，它们应该只通过 Raft 进行相互交流。
+你的 kvservers 不应该直接通信，它们应该只通过 Raft 进行相互交流。
 
-实验任务 1：首先实现不丢失消息以及没有失败的服务器场景下的解决方案。你需要为 client.go 中的 Clerk Put/Append/Get 方法添加 RPC 发送代码，并在 server.go 中实现 PutAppend() 和 Get() RPC 处理程序。这些处理程序应使用 Start() 在 Raft 日志中输入一个Op；你应在 server.go 中填写 Op 结构定义，使其描述一个 Put/Append/Get 操作。每个服务器应该在 Raft 提交 Op 命令时执行这些命令，也就是说，当它们出现在 applyCh 上时。RPC 处理程序应该注意到 Raft 何时提交其 Op，然后回复 RPC。
+实验任务 1：首先实现不丢失消息以及没有失败的服务器场景下的解决方案。
+
+你需要为 client.go 中的 Clerk Put/Append/Get 方法添加 RPC 发送代码，并在 server.go 中实现 PutAppend() 和 Get() RPC 处理程序。这些处理程序应使用 Start() 在 Raft 日志中输入一个 Op；你应在 server.go 中填写 Op 结构体定义使其描述一个 Put/Append/Get 操作。每个服务器应该在 Raft 提交 Op 命令时执行这些命令，也就是说，当它们出现在 applyCh 上时。RPC 处理程序应该注意到 Raft 何时提交其 Op，然后回复 RPC。
 
 >[!TIP]
 >
@@ -59,7 +61,7 @@ Clerk 有时不知道哪个 kvserver 是 Raft 的领导者。如果 Clerk 向错
 >- A kvserver should not complete a `Get()` RPC if it is not part of a majority (so that it does not serve stale data). A simple solution is to enter every `Get()` (as well as each `Put()` and `Append()`) in the Raft log. You don't have to implement the optimization for read-only operations that is described in Section 8.
 >- It's best to add locking from the start because the need to avoid deadlocks sometimes affects overall code design. Check that your code is race-free using `go test -race`.
 
-现在你应该修改你的解决方案，以便在面对网络和服务器故障时能够继续下去。你将面临的一个问题是，Clerk 可能要多次发送 RPC，直到它找到一个积极回复的 kvserver。如果一个领导者在向 Raft 日志提交条目后发生故障，Clerk 可能不会收到回复，因此可能会向另一个领导者重新发送请求。对 Clerk.Put() 或 Clerk.Append() 的每次调用应该只导致一次执行，所以你必须确保重新发送不会导致服务器执行两次请求。
+现在你应该修改你的解决方案，以便在面对网络和服务器故障时能够继续工作。你将面临的一个问题是，Clerk 可能要多次发送 RPC，直到它找到一个积极回复的 kvserver。如果一个 Leader 在向 Raft 日志提交条目后发生故障，Clerk 可能不会收到回复，因此可能会向另一个 Leader 重新发送请求。对 Clerk.Put() 或 Clerk.Append() 的每次调用应该只导致一次执行，所以你必须确保重新发送不会导致服务器执行两次请求。
 
 实验任务 2：添加代码来处理失败，以及处理重复的请求。
 
@@ -188,15 +190,7 @@ raft 的博士毕业论文里对 client 的设计讲的会比较详细一些，�
 | response   | 状态机的输出，如果成功的话         |
 | leaderHint | 如果知道的话返回最近的 leader 地址 |
 
-接收者的实现：
 
-1.  如果不是领导者，则回复 NOT_LEADER，在有条件的情况下提供提示 (6.2)
-2.  追加命令到日志，复制并提交
-3.  如果没有 clientId 的记录，或者如果客户的 sequenceNum 的响应已经被丢弃，则回复 SESSION_EXPIRED（6.3）
-4.  如果客户端 sequenceNum 的请求已经处理了，返回 OK（6.3）
-5.  顺序 apply 日志
-6.  保留客户端 sequenceNum 状态机的输出，忽略客户端之前发来的请求
-7.  携带状态机的输出返回 OK
 
 **ClientQuery RPC**
 
@@ -210,15 +204,7 @@ raft 的博士毕业论文里对 client 的设计讲的会比较详细一些，�
 | response   | 状态机的输出，如果成功的话         |
 | leaderHint | 如果知道的话返回最近的 leader 地址 |
 
-接收者的实现：
 
-1.  如果不是领导者，则回复 NOT_LEADER，在有条件的情况下提供提示 (6.2)
-2.  等待最后一条提交日志的任期是当前 leader 的任期
-3.  保存 commitIndex 作为本地只读变量（下面要用）
-4.  发送新一轮的心跳，等待大多数节点回复
-5.  等待状态机至少前进到当前要读的日志索引
-6.  处理
-7.  回复 OK
 
 **RegisterClient RPC**
 
@@ -232,18 +218,13 @@ raft 的博士毕业论文里对 client 的设计讲的会比较详细一些，�
 | clientId   | 客户端标识                         |
 | leaderHint | 如果知道的话返回最近的 leader 地址 |
 
-接收者的实现：
 
-1.  如果不是领导者，则回复 NOT_LEADER，在有条件的情况下提供提示 (6.2)
-2.  追加注册命令到日志，复制并提交
-3.  顺序 apply 日志，分配客户端 session
-4.  回复 OK，返回唯一标识符（可以使用日志索引号）
 
 
 
 ## 结构体设计
 
-本次实验和论文里的框架还有点不太一样，首先其实可以使用通用的结构体来表示请求，这样处理比较方便
+本次实验和论文里的框架还有点不太一样，可以使用通用的结构体来表示读写请求，这样处理比较方便
 
 ```go
 type Err string
@@ -538,9 +519,9 @@ func (kv *KVServer) handleApply() {
 
 ## raft 速度问题
 
-之前实现的 raft 虽然正确性没问题，但是 apply 速度很慢，原因就在于提交慢了，后面增加了复制日志成功后更新 matchIndex 时也更新 commitIndex ，这样更新会比较及时。为什么心跳检查提交还保留呢？假设某个 leader 把日志复制给了大多数就故障了，然后期间没有提交日志，它又竞选成功，此时就没有方法去触发 commitIndex 的更新了。
+之前实现的 raft 虽然正确性没问题，但是 apply 速度很慢，发现其中一个原因是日志提交慢了，后面调整复制日志成功后更新 matchIndex 时也更新 commitIndex ，这样更新会比较及时。为什么心跳检查提交还保留呢？假设某个 leader 把日志复制给了大多数就故障了，然后期间没有提交日志，它又竞选成功，那么此时就没有方法去触发 commitIndex 的更新了。
 
-另外 apply 索引排序也优化了下，之前简单使用了冒泡排序，不过测试下来好像没啥大影响；另外这里其实可以不用排序，交给上层去处理也是没问题的，我只是觉得排序了对上层逻辑更清晰简单一些。
+另外 apply 索引排序也优化了下，不过测试下来好像没啥大影响；另外这里其实可以不用排序，交给上层去处理也是没问题的，我只是觉得排序了对上层逻辑更清晰简单一些。
 
 3A 的速度测试是一个请求一个请求的发，收到回复再发下一个，对于之前的设计，满足阈值的条目数会立刻发送，否则等待心跳发送日志，之前心跳设置的 100 ms，那么相当于一秒就复制 10 条日志，满足不了测试要求，因此调整阈值为 1 表示收到请求立即复制来满足测试要求。
 
@@ -548,7 +529,7 @@ func (kv *KVServer) handleApply() {
 
 ## lab02 的 bug
 
-在做 lab03 时，发现 lab02 的快照实现有点问题，主要是在 recover 时，lastApplied 设置为了第一条日志的索引，实际上已提交不代表已应用，所以 lastApplied 应该从 0 开始，如果有快照，还要重新 apply 快照。
+在做 lab03 时，发现 lab02 的快照实现有点问题，主要是在 recover 时，lastApplied 设置为了当前第一条日志的索引（一定已提交），实际上日志已提交不代表已应用，所以 lastApplied 应该从 0 开始，如果有快照，还要重新 apply 快照。
 
 这也导致我做 3B 实验时，快照恢复的测试一开始不通过。
 

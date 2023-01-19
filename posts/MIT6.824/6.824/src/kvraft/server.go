@@ -269,7 +269,7 @@ func (kv *KVServer) handleApply() {
 				kv.Unlock("replyCommand")
 
 				// 检测是否需要执行快照
-				if kv.rf.NeedSnapshot(kv.maxraftstate) {
+				if kv.rf.RaftStateNeedSnapshot(kv.maxraftstate) {
 					kv.DPrintf("======== snapshot %d ========", applyLog.CommandIndex)
 					w := new(bytes.Buffer)
 					e := labgob.NewEncoder(w)
@@ -376,7 +376,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 	kv.lastApplyIndex = 0
 
-	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.applyCh = make(chan raft.ApplyMsg, 6)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	kv.db = make(map[string]string)

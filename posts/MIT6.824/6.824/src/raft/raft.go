@@ -79,7 +79,7 @@ func (rf *Raft) Unlock(owner string) {
 }
 
 // NeedSnapshot 供上层判断是否需要执行快照
-func (rf *Raft) NeedSnapshot(maxraftstate int) bool {
+func (rf *Raft) RaftStateNeedSnapshot(maxraftstate int) bool {
 	if maxraftstate != -1 && rf.persister.RaftStateSize()*100/maxraftstate >= 90 {
 		return true
 	}
@@ -96,11 +96,15 @@ func (rf *Raft) InstallSnapshot(request *InstallSnapshotArgs, response *InstallS
 		return
 	}
 
-	rf.checkTerm(request.LeaderId, request.Term)
+	// 后续快照一定会持久化，所以这里就不需要持久化了
+	needPersist := rf.checkTerm(request.LeaderId, request.Term, true)
 
 	// 本地快照更新则忽略此快照
 	if request.LastSnapLog.CommandIndex <= rf.logs[0].CommandIndex {
 		rf.DPrintf("local snap is more newer")
+		if needPersist {
+			rf.persist()
+		}
 		return
 	}
 
@@ -122,6 +126,11 @@ func (rf *Raft) InstallSnapshot(request *InstallSnapshotArgs, response *InstallS
 	}
 
 	rf.SaveStateAndSnapshot(request.Data)
+
+	// 快照一定是已提交的日志
+	if rf.commitIndex < request.LastSnapLog.CommandIndex {
+		rf.commitIndex = request.LastSnapLog.CommandIndex
+	}
 
 	rf.internalApplyList = append(rf.internalApplyList, ApplyMsg{
 		CommandValid:  false,
@@ -164,7 +173,7 @@ func (rf *Raft) sendSnap(peer int) {
 			return
 		}
 
-		rf.checkTerm(peer, response.Term)
+		rf.checkTerm(peer, response.Term, false)
 
 		if rf.role != Leader {
 			rf.DPrintf("now is not leader")
@@ -249,7 +258,12 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 		return
 	}
 
-	rf.checkTerm(request.LeaderId, request.Term)
+	needPersist := rf.checkTerm(request.LeaderId, request.Term, true)
+	defer func() {
+		if needPersist {
+			rf.persist()
+		}
+	}()
 	response.Term = rf.currentTerm
 
 	rf.printLog()
@@ -278,7 +292,8 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 					if lastLog.CommandIndex < entry.CommandIndex ||
 						(rf.logs[0].CommandIndex <= entry.CommandIndex && entry.Term != rf.log(entry.CommandIndex).Term) {
 						rf.logs = append(rf.logs[:rf.index(entry.CommandIndex)], request.Entries[idx:]...)
-						rf.persist()
+						needPersist = true
+						//rf.persist()
 						rf.DPrintf("====== append log %d-%d ======", entry.CommandIndex, lastEntry.CommandIndex)
 						break
 					}
@@ -335,13 +350,19 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 }
 
 // 如果接收到的 RPC 请求或响应中，任期号 T > currentTerm，则令 currentTerm = T，并切换为 follower 状态
-func (rf *Raft) checkTerm(peer int, term int) {
+func (rf *Raft) checkTerm(peer int, term int, delayPersist bool) (needPersist bool) {
 	if term > rf.currentTerm {
 		rf.DPrintf("====== peer %d's term %d > currentTerm ======", peer, term)
 		rf.role = Follower
 		rf.currentTerm = term
 		rf.votedFor = -1
-		rf.persist()
+		if !delayPersist {
+			rf.persist()
+		}
+		// 处理请求时可能后续操作也需要持久化日志，因此我们可以延迟一起去持久化
+		return true
+	} else {
+		return false
 	}
 }
 
@@ -397,7 +418,7 @@ func (rf *Raft) replicate(peer int) {
 			return
 		}
 
-		rf.checkTerm(peer, response.Term)
+		rf.checkTerm(peer, response.Term, false)
 
 		if rf.role != Leader {
 			rf.DPrintf("now is not leader")
@@ -665,7 +686,12 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply
 	rf.Lock("RequestVote")
 	defer rf.Unlock("RequestVote")
 
-	rf.checkTerm(request.CandidateId, request.Term)
+	needPersist := rf.checkTerm(request.CandidateId, request.Term, true)
+	defer func() {
+		if needPersist {
+			rf.persist()
+		}
+	}()
 
 	// 对端任期小，拒绝投票
 	if request.Term < rf.currentTerm {
@@ -693,7 +719,8 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply
 	// 既然要投票给别人，那自己肯定就不竞选了
 	rf.role = Follower
 	rf.votedFor = request.CandidateId
-	rf.persist()
+	needPersist = true
+	//rf.persist()
 	response.Term, response.VoteGranted = rf.currentTerm, true
 	rf.ResetElectionTimeout()
 }
@@ -737,7 +764,7 @@ func (rf *Raft) startElection() {
 					return
 				}
 
-				rf.checkTerm(peer, response.Term)
+				rf.checkTerm(peer, response.Term, false)
 
 				// 已经不是竞选者角色了也不用理会回复
 				if rf.role != Candidate {
@@ -805,7 +832,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		// 请求达到一定数目再一起发送
 		rf.plug += 1
 		if rf.plug >= PlugNumber {
-			rf.plug = 0
 			rf.broadcast()
 		}
 	}
@@ -843,25 +869,25 @@ func (rf *Raft) apply(ctx context.Context) {
 			// 先把要提交的日志整合出来，避免占用锁
 			rf.Lock("apply")
 			internalApplyList := make([]ApplyMsg, 0)
-			snapIndex := -1
+			maxSnapshotIndex := 0
 			if len(rf.internalApplyList) > 0 {
+				snapIndex := 0
 				// 取出要 apply 的索引最大的快照
-				maxSnapshotIndex := 0
 				for idx := range rf.internalApplyList {
 					if rf.internalApplyList[idx].SnapshotIndex > maxSnapshotIndex {
 						maxSnapshotIndex = rf.internalApplyList[idx].SnapshotIndex
 						snapIndex = idx
 					}
 				}
-				//internalApplyList = append(internalApplyList, rf.internalApplyList...)
 				internalApplyList = append(internalApplyList, rf.internalApplyList[snapIndex])
+
 				// 清空队列
 				rf.internalApplyList = make([]ApplyMsg, 0)
 			}
 
 			startIndex := rf.lastApplied + 1
-			if snapIndex > startIndex {
-				startIndex = snapIndex
+			if maxSnapshotIndex > startIndex {
+				startIndex = maxSnapshotIndex
 			}
 			if startIndex >= rf.logs[0].CommandIndex {
 				for idx := startIndex; idx <= rf.commitIndex; idx++ {
@@ -948,6 +974,7 @@ func (rf *Raft) heartbeat() {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) election(ctx context.Context) {
+	rf.ResetElectionTimeout()
 	for rf.killed() == false {
 		select {
 		case <-rf.electionTimer.C:
@@ -1014,7 +1041,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.cancel = cancel
 
 	// start ticker goroutine to start elections
-	rf.ResetElectionTimeout()
 	go rf.election(ctx)
 	go rf.heartbeat()
 
