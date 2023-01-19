@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-const Debug = true
+const Debug = false
 
 func (kv *KVServer) DPrintf(format string, a ...interface{}) {
 	if Debug {
