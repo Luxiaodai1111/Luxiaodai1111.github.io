@@ -75,6 +75,8 @@
 # ZooKeeper
 
 >   ## [🏷️ ZooKeeper](posts/MIT6.824/Lecture/lecture08-Zookeeper.md)
+>
+>   ## [🧪 Lab 03：KVService](posts/MIT6.824/Lab/Lab03-KVService.md)
 
 ​	
 

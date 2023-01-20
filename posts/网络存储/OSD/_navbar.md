@@ -21,8 +21,6 @@
 * ❤️ 友链
   * [💘 Learn Git Branching](https://learngitbranching.js.org/?locale=zh_CN)
   * [💘 drawio](https://app.diagrams.net/)
-  * [💘 Reasonable Colors](https://reasonable.work/colors/)
-  * [💘 CSS Design Awards](https://www.cssdesignawards.com/)
   * [💘 电脑博物馆](http://www.compumuseum.com/)
   * [💘 Hello Github](https://hellogithub.com/)
 
