@@ -101,6 +101,8 @@
 # Cache-Consistency
 
 >   ## [🏷️ Frangipani 的缓存一致性设计](posts/MIT6.824/Lecture/lecture11-Cache-Consistency.md)
+>
+>   ## [🧪 Lab 04：Sharded KeyValue Service](posts/MIT6.824/Lab/Lab04-Sharded-KeyValue-Service.md)
 
 ​	
 
