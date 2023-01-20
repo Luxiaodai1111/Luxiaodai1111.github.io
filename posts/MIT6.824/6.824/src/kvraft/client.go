@@ -58,9 +58,8 @@ func (ck *Clerk) Get(key string) string {
 		Key:         key,
 		Op:          OpGet,
 		ClientId:    ck.clientId,
-		SequenceNum: ck.maxSequenceNum,
+		SequenceNum: atomic.AddInt64(&ck.maxSequenceNum, 1),
 	}
-	atomic.AddInt64(&ck.maxSequenceNum, 1)
 
 	leader := ck.leader
 	for {
@@ -104,9 +103,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		Value:       value,
 		Op:          op,
 		ClientId:    ck.clientId,
-		SequenceNum: ck.maxSequenceNum,
+		SequenceNum: atomic.AddInt64(&ck.maxSequenceNum, 1),
 	}
-	atomic.AddInt64(&ck.maxSequenceNum, 1)
 
 	leader := ck.leader
 	for {

@@ -1,5 +1,7 @@
 package shardctrler
 
+import "time"
+
 //
 // Shard controler: assigns shards to replication groups.
 //
@@ -29,45 +31,32 @@ type Config struct {
 }
 
 const (
-	OK = "OK"
+	OK             = "OK"
+	ErrTimeout     = "ErrTimeout"
+	ErrWrongLeader = "ErrWrongLeader"
+
+	OpJoin  = "OpJoin"
+	OpLeave = "OpLeave"
+	OpMove  = "OpMove"
+	OpQuery = "OpQuery"
+
+	ExecuteTimeout = time.Millisecond * 500
 )
 
 type Err string
 
-type JoinArgs struct {
-	Servers map[int][]string // new GID -> servers mappings
+type CommonArgs struct {
+	Op          string
+	Servers     map[int][]string // JoinArgs: new GID -> servers mappings
+	GIDs        []int            // LeaveArgs
+	Shard       int              // MoveArgs
+	GID         int              // MoveArgs
+	Num         int              // QueryArgs: desired config number
+	ClientId    int64            // 客户端标识
+	SequenceNum int64            // 请求序号
 }
 
-type JoinReply struct {
-	WrongLeader bool
-	Err         Err
-}
-
-type LeaveArgs struct {
-	GIDs []int
-}
-
-type LeaveReply struct {
-	WrongLeader bool
-	Err         Err
-}
-
-type MoveArgs struct {
-	Shard int
-	GID   int
-}
-
-type MoveReply struct {
-	WrongLeader bool
-	Err         Err
-}
-
-type QueryArgs struct {
-	Num int // desired config number
-}
-
-type QueryReply struct {
-	WrongLeader bool
-	Err         Err
-	Config      Config
+type CommonReply struct {
+	Err    Err
+	Config Config
 }

@@ -52,7 +52,7 @@ $
 
 shardctrler 管理一系列编号的配置。每个配置都描述了一组复制组和复制组的 shard分配情况。每当这个分配需要改变的时候，shard 控制器就用新的分配创建一个新的配置。键/值客户端和服务端通过询问 shardctrler 获取当前(或过去)的配置。
 
-您需实现 shardctrler/common.go 中描述的 RPC 接口，该接口由 Join、Leave、Move和 Query RPC 组成。这些 RPC 旨在允许管理员（和测试）控制 shardctrler 添加、移除复制组以及在复制组之间移动分片。
+您需实现 shardctrler/common.go 中描述的 RPC 接口，该接口由 Join、Leave、Move 和 Query RPC 组成。这些 RPC 旨在允许管理员（和测试）控制 shardctrler 添加、移除复制组以及在复制组之间移动分片。
 
 管理员使用 Join RPC 添加新的复制组。它的参数是从唯一的非零副本组标识符（GID）到服务器名称列表的一组映射。shardctrler 应该通过创建一个包含新复制组的新配置来做出反应。新的配置应该在整个组中尽可能均匀地划分分片，并且应该移动尽可能少的分片。如果 GID 不是当前配置的一部分，shardctrler 应该允许重用它（即应该允许 GID 加入，然后离开，然后再次加入）
 

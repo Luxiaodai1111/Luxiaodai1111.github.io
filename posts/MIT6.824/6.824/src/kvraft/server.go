@@ -221,7 +221,7 @@ func (kv *KVServer) handleApply() {
 				if applyLog.CommandIndex <= kv.lastApplyIndex {
 					// 比如 raft 重启了，就要重新 apply
 					kv.DPrintf("***** command index %d is older than lastApplyIndex %d *****",
-						applyLog.SnapshotIndex, kv.lastApplyIndex)
+						applyLog.CommandIndex, kv.lastApplyIndex)
 					continue
 				}
 				kv.lastApplyIndex = applyLog.CommandIndex
@@ -264,6 +264,7 @@ func (kv *KVServer) handleApply() {
 					select {
 					case kv.notifyChans[applyLog.CommandIndex] <- reply:
 					default:
+						kv.DPrintf("reply to chan index %d failed", applyLog.CommandIndex)
 					}
 				}
 				kv.Unlock("replyCommand")
