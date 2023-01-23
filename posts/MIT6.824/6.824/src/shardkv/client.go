@@ -8,11 +8,23 @@ package shardkv
 // talks to the group that holds the key's shard.
 //
 
-import "6.824/labrpc"
+import (
+	"6.824/labrpc"
+	"fmt"
+	"log"
+	"sync/atomic"
+)
 import "crypto/rand"
 import "math/big"
 import "6.824/shardctrler"
 import "time"
+
+func (ck *Clerk) DPrintf(format string, a ...interface{}) {
+	if Debug {
+		log.Printf(fmt.Sprintf("[ShardKV Clerk]:%s", format), a...)
+	}
+	return
+}
 
 //
 // which shard is a key in?
@@ -36,10 +48,11 @@ func nrand() int64 {
 }
 
 type Clerk struct {
-	sm       *shardctrler.Clerk
-	config   shardctrler.Config
-	make_end func(string) *labrpc.ClientEnd
-	// You will have to modify this struct.
+	sm             *shardctrler.Clerk
+	config         shardctrler.Config
+	make_end       func(string) *labrpc.ClientEnd
+	clientId       int64 // 客户端标识
+	maxSequenceNum int64 // 当前使用的最大命令序号
 }
 
 //
@@ -55,7 +68,8 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck := new(Clerk)
 	ck.sm = shardctrler.MakeClerk(ctrlers)
 	ck.make_end = make_end
-	// You'll have to add code here.
+	ck.clientId = nrand()
+	ck.maxSequenceNum = 0
 	return ck
 }
 
@@ -66,8 +80,14 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 // You will have to modify this function.
 //
 func (ck *Clerk) Get(key string) string {
-	args := GetArgs{}
-	args.Key = key
+	ck.DPrintf("=== request get key: %s ===", key)
+
+	args := CommonArgs{
+		Key:         key,
+		Op:          OpGet,
+		ClientId:    ck.clientId,
+		SequenceNum: atomic.AddInt64(&ck.maxSequenceNum, 1),
+	}
 
 	for {
 		shard := key2shard(key)
@@ -76,7 +96,7 @@ func (ck *Clerk) Get(key string) string {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
-				var reply GetReply
+				var reply CommonReply
 				ok := srv.Call("ShardKV.Get", &args, &reply)
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
 					return reply.Value
@@ -100,11 +120,15 @@ func (ck *Clerk) Get(key string) string {
 // You will have to modify this function.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	args := PutAppendArgs{}
-	args.Key = key
-	args.Value = value
-	args.Op = op
+	ck.DPrintf("=== request %s <%s>:<%s> ===", op, key, value)
 
+	args := CommonArgs{
+		Key:         key,
+		Value:       value,
+		Op:          op,
+		ClientId:    ck.clientId,
+		SequenceNum: atomic.AddInt64(&ck.maxSequenceNum, 1),
+	}
 
 	for {
 		shard := key2shard(key)
@@ -112,7 +136,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
-				var reply PutAppendReply
+				var reply CommonReply
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
 				if ok && reply.Err == OK {
 					return
