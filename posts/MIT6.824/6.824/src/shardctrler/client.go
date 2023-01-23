@@ -23,7 +23,6 @@ func (ck *Clerk) DPrintf(format string, a ...interface{}) {
 
 type Clerk struct {
 	servers        []*labrpc.ClientEnd
-	leader         int   // leader 的地址
 	clientId       int64 // 客户端标识
 	maxSequenceNum int64 // 当前使用的最大命令序号
 }
@@ -38,7 +37,6 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	ck.leader = 0
 	ck.clientId = nrand()
 	ck.maxSequenceNum = 0
 	return ck
@@ -79,6 +77,7 @@ func (ck *Clerk) Query(num int) Config {
 		Op:  OpQuery,
 		Num: num,
 	}
+	ck.DPrintf("=== request %s config %d  ===", args.Op, args.Num)
 
 	return ck.Command(args)
 }
@@ -88,6 +87,7 @@ func (ck *Clerk) Join(servers map[int][]string) {
 		Op:      OpJoin,
 		Servers: servers,
 	}
+	ck.DPrintf("=== request %s %+v ===", args.Op, args.Servers)
 
 	ck.Command(args)
 }
@@ -97,6 +97,7 @@ func (ck *Clerk) Leave(gids []int) {
 		Op:   OpLeave,
 		GIDs: gids,
 	}
+	ck.DPrintf("=== request %s %v ===", args.Op, args.GIDs)
 
 	ck.Command(args)
 }
@@ -107,6 +108,7 @@ func (ck *Clerk) Move(shard int, gid int) {
 		Shard: shard,
 		GID:   gid,
 	}
+	ck.DPrintf("=== request %s %d %d ===", args.Op, args.Shard, args.GID)
 
 	ck.Command(args)
 }

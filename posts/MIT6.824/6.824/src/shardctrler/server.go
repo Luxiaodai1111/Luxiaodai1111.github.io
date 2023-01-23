@@ -4,6 +4,7 @@ import (
 	"6.824/raft"
 	"fmt"
 	"log"
+	"sort"
 	"sync/atomic"
 	"time"
 )
@@ -143,15 +144,28 @@ func (sc *ShardCtrler) isDuplicateRequest(clientId, sequenceNum int64) bool {
 	return false
 }
 
-func (sc *ShardCtrler) balanceShard(groups map[int][]string, deletedGIDs []int) [NShards]int {
+func (sc *ShardCtrler) balanceShard(groups map[int][]string) [NShards]int {
 	lastNum := len(sc.configs) - 1
 	shardMap := sc.configs[lastNum].Shards
-	gidShardLoadInfo := make(map[int][]int)
-	noGidShardList := make([]int, 0)
+	// 现在没有可用服务器
+	if len(groups) == 0 {
+		sc.DPrintf("No servers available now")
+		for idx := range shardMap {
+			shardMap[idx] = 0
+		}
+		return shardMap
+	}
+
 	// 统计当前服务器负载分布
+	gidShardLoadInfo := make(map[int][]int)
+	keys := make([]int, 0)
 	for gid, _ := range groups {
 		gidShardLoadInfo[gid] = make([]int, 0)
+		keys = append(keys, gid)
 	}
+	sort.Ints(keys)
+
+	noGidShardList := make([]int, 0)
 	for idx := range shardMap {
 		gid := shardMap[idx]
 		if gid == 0 {
@@ -165,13 +179,82 @@ func (sc *ShardCtrler) balanceShard(groups map[int][]string, deletedGIDs []int) 
 			noGidShardList = append(noGidShardList, idx)
 		}
 	}
-	// TODO:不再工作的 GID 把它的 shard 分配给当前 shard 负载最低的 GID
-	if len(noGidShardList) > 0 {
+	sc.DPrintf("gidShardLoadInfo: %+v", gidShardLoadInfo)
+	sc.DPrintf("noGidShardList: %v", noGidShardList)
 
+	// 根据负载情况排序
+	//loadList := make([]int, 0)
+	//for gid, _ := range gidShardLoadInfo {
+	//	loadList = append(loadList, gid)
+	//}
+	//sort.Slice(loadList, func(i, j int) bool {
+	//	if len(gidShardLoadInfo[loadList[i]]) < len(gidShardLoadInfo[loadList[j]]) {
+	//		return true
+	//	}
+	//	return false
+	//})
+	//sc.DPrintf("loadList: %v", loadList)
+
+	// 不再工作的 GID 把它的 shard 分配给当前 shard 负载最低的 GID
+	if len(noGidShardList) > 0 {
+		for i := range noGidShardList {
+			shard := noGidShardList[i]
+			minLoad := NShards + 1
+			minLoadGid := 0
+			for j := range keys {
+				gid := keys[j]
+				info := gidShardLoadInfo[gid]
+				if len(info) < minLoad {
+					minLoad = len(info)
+					minLoadGid = gid
+				}
+			}
+			gidShardLoadInfo[minLoadGid] = append(gidShardLoadInfo[minLoadGid], shard)
+		}
+		sc.DPrintf("gidShardLoadInfo after allocate noGidShardList: %+v", gidShardLoadInfo)
 	}
 
-	// TODO:平均每个 GID 的负载，每次均衡最大和最小负载的 GID，直到他们差值为 1 或 0
+	// 平均每个 GID 的负载，每次均衡最大和最小负载的 GID，直到他们差值为 1 或 0
+	for {
+		minLoadGid, maxLoadGid := 0, 0
+		minLoad, maxLoad := NShards+1, -1
+		for i := range keys {
+			gid := keys[i]
+			info := gidShardLoadInfo[gid]
+			if len(info) < minLoad {
+				minLoad = len(info)
+				minLoadGid = gid
+			}
+			if len(info) > maxLoad {
+				maxLoad = len(info)
+				maxLoadGid = gid
+			}
+		}
 
+		if maxLoad-minLoad < 2 {
+			break
+		} else {
+			for maxLoad-minLoad > 1 {
+				idx := len(gidShardLoadInfo[maxLoadGid]) - 1
+				balanceShard := gidShardLoadInfo[maxLoadGid][idx]
+				gidShardLoadInfo[maxLoadGid] = gidShardLoadInfo[maxLoadGid][:idx]
+				maxLoad -= 1
+
+				gidShardLoadInfo[minLoadGid] = append(gidShardLoadInfo[minLoadGid], balanceShard)
+				minLoad += 1
+			}
+		}
+	}
+
+	sc.DPrintf("gidShardLoadInfo after balance: %+v", gidShardLoadInfo)
+
+	// 生成 shardMap
+	for gid, info := range gidShardLoadInfo {
+		for i := range info {
+			shardMap[info[i]] = gid
+		}
+	}
+	sc.DPrintf("shardMap: %v", shardMap)
 	return shardMap
 }
 
@@ -207,47 +290,63 @@ func (sc *ShardCtrler) handleApply() {
 				}
 
 				// 更新状态机
+				lastNum := len(sc.configs) - 1
+				groups := make(map[int][]string)
+				for k, v := range sc.configs[lastNum].Groups {
+					groups[k] = v
+				}
 				if op.Op == OpJoin {
-					lastNum := len(sc.configs) - 1
-					groups := sc.configs[lastNum].Groups
 					for gid, servers := range op.Servers {
 						groups[gid] = servers
 					}
-					newShards := sc.balanceShard(groups, []int{})
+					newShards := sc.balanceShard(groups)
 					sc.configs = append(sc.configs, Config{
 						Num:    lastNum + 1,
 						Shards: newShards,
 						Groups: groups,
 					})
+					sc.DPrintf("config %d is %+v", lastNum+1, sc.configs[lastNum+1])
 				} else if op.Op == OpLeave {
-					lastNum := len(sc.configs) - 1
-					groups := sc.configs[lastNum].Groups
 					for idx := range op.GIDs {
 						gid := op.GIDs[idx]
-						delete(groups, gid)
+						if _, ok := groups[gid]; ok {
+							delete(groups, gid)
+						}
 					}
-					newShards := sc.balanceShard(groups, op.GIDs)
+					newShards := sc.balanceShard(groups)
 					sc.configs = append(sc.configs, Config{
 						Num:    lastNum + 1,
 						Shards: newShards,
 						Groups: groups,
 					})
+					sc.DPrintf("config %d is %+v", lastNum+1, sc.configs[lastNum+1])
 				} else if op.Op == OpMove {
-					lastNum := len(sc.configs) - 1
 					shardsMap := sc.configs[lastNum].Shards
 					if op.Shard < 0 || op.Shard > NShards-1 {
 						sc.DPrintf("move args error")
 						sc.Kill()
 						return
 					}
-					shardsMap[op.Shard] = op.GID
-					sc.configs = append(sc.configs, Config{
-						Num:    lastNum + 1,
-						Shards: shardsMap,
-						Groups: sc.configs[lastNum].Groups,
-					})
+					if _, ok := groups[op.GID]; ok {
+						shardsMap[op.Shard] = op.GID
+						sc.configs = append(sc.configs, Config{
+							Num:    lastNum + 1,
+							Shards: shardsMap,
+							Groups: sc.configs[lastNum].Groups,
+						})
+						sc.DPrintf("config %d is %+v", lastNum+1, sc.configs[lastNum+1])
+					} else {
+						sc.DPrintf("undo move %d %d", op.Shard, op.GID)
+					}
 				} else {
-					reply.Config = sc.configs[op.Num]
+					var idx int
+					if op.Num == -1 || idx > lastNum {
+						idx = lastNum
+					} else {
+						idx = op.Num
+					}
+					reply.Config = sc.configs[idx]
+					sc.DPrintf("query config %d is %+v", idx, reply.Config)
 				}
 
 				sc.Lock("replyCommand")
@@ -292,7 +391,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sc.applyCh = make(chan raft.ApplyMsg, 6)
 	sc.rf = raft.Make(servers, me, persister, sc.applyCh)
 
-	// Your code here.
 	sc.notifyChans = make(map[int]chan *CommonReply)
 	sc.dupReqHistory = make(map[int64]map[int64]struct{})
 
