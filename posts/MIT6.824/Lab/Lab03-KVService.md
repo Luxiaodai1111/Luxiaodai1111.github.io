@@ -264,9 +264,8 @@ func (ck *Clerk) Get(key string) string {
 		Key:         key,
 		Op:          OpGet,
 		ClientId:    ck.clientId,
-		SequenceNum: ck.maxSequenceNum,
+		SequenceNum: atomic.AddInt64(&ck.maxSequenceNum, 1),
 	}
-	atomic.AddInt64(&ck.maxSequenceNum, 1)
 
 	leader := ck.leader
 	for {
@@ -400,7 +399,7 @@ func (kv *KVServer) handleApply() {
 				if applyLog.CommandIndex <= kv.lastApplyIndex {
 					// 比如 raft 重启了，就要重新 apply
 					kv.DPrintf("***** command index %d is older than lastApplyIndex %d *****",
-						applyLog.SnapshotIndex, kv.lastApplyIndex)
+						applyLog.CommandIndex, kv.lastApplyIndex)
 					continue
 				}
 				kv.lastApplyIndex = applyLog.CommandIndex
@@ -443,12 +442,13 @@ func (kv *KVServer) handleApply() {
 					select {
 					case kv.notifyChans[applyLog.CommandIndex] <- reply:
 					default:
+						kv.DPrintf("reply to chan index %d failed", applyLog.CommandIndex)
 					}
 				}
 				kv.Unlock("replyCommand")
 
 				// 检测是否需要执行快照
-				if kv.rf.NeedSnapshot(kv.maxraftstate) {
+				if kv.rf.RaftStateNeedSnapshot(kv.maxraftstate) {
 					kv.DPrintf("======== snapshot %d ========", applyLog.CommandIndex)
 					w := new(bytes.Buffer)
 					e := labgob.NewEncoder(w)
