@@ -182,19 +182,6 @@ func (sc *ShardCtrler) balanceShard(groups map[int][]string) [NShards]int {
 	sc.DPrintf("gidShardLoadInfo: %+v", gidShardLoadInfo)
 	sc.DPrintf("noGidShardList: %v", noGidShardList)
 
-	// 根据负载情况排序
-	//loadList := make([]int, 0)
-	//for gid, _ := range gidShardLoadInfo {
-	//	loadList = append(loadList, gid)
-	//}
-	//sort.Slice(loadList, func(i, j int) bool {
-	//	if len(gidShardLoadInfo[loadList[i]]) < len(gidShardLoadInfo[loadList[j]]) {
-	//		return true
-	//	}
-	//	return false
-	//})
-	//sc.DPrintf("loadList: %v", loadList)
-
 	// 不再工作的 GID 把它的 shard 分配给当前 shard 负载最低的 GID
 	if len(noGidShardList) > 0 {
 		for i := range noGidShardList {
