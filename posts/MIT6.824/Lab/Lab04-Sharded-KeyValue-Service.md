@@ -150,7 +150,7 @@ shardkv 服务器只是一个副本组的成员，给定复制组中的服务器
 注意：
 
 - 您的服务器需要定期轮询 shardctrler 以了解新的配置。测试预计您的代码大约每 100 毫秒轮询一次；快一点是可以的，但是慢了可能会出问题。
-- 服务器需要互相发送 RPC，以便在配置更改期间传输分片。shardctrler 的配置结构包含服务器名，但是您需要一个 labrpc 以便发送 RPC。您应该使用 make_end() 函数将传递给 StartServer() 的服务器名称转换为 ClientEnd。shardkv/client.go 包含了实现这些的代码。
+- 服务器需要互相发送 RPC，以便在配置更改期间传输分片。shardctrler 的配置结构包含服务器名，但是您需要一个 labrpc 以便发送 RPC。您应该使用 make_end() 函数将传递给 StartServer() 的服务器名称转换为 ClientEnd。可以参考 shardkv/client.go 有实现这些代码。
 
 
 
@@ -218,7 +218,245 @@ challenge：修改您的解决方案，以便复制组在能够提供分片服�
 
 ---
 
-# 设计思路
+# Part A 设计思路
+
+对于 Part A，其实和 lab3 差不多，代码 copy 过来就行了，主要是更新状态机的部分不同罢了，另外配置本身数据量很少，所以快照也不太需要。
+
+```go
+func (sc *ShardCtrler) handleApply() {
+	for sc.killed() == false {
+		select {
+		case applyLog := <-sc.applyCh:
+			if applyLog.CommandValid {
+				op, ok := applyLog.Command.(Op)
+				if !ok {
+					sc.DPrintf("[panic] recieved apply log's command error")
+					sc.Kill()
+					return
+				}
+
+				reply := &CommonReply{
+					Err: OK,
+				}
+
+				if applyLog.CommandIndex <= sc.lastApplyIndex {
+					// 比如 raft 重启了，就要重新 apply
+					sc.DPrintf("***** command index %d is older than lastApplyIndex %d *****",
+						applyLog.CommandIndex, sc.lastApplyIndex)
+					continue
+				}
+				sc.lastApplyIndex = applyLog.CommandIndex
+
+				sc.DPrintf("recieve apply log: %d, op info: %+v", applyLog.CommandIndex, op)
+				// 防止重复应用同一条修改命令
+				if op.Op != OpQuery && sc.isDuplicateRequest(op.ClientId, op.SequenceNum) {
+					sc.DPrintf("found duplicate request: %+v", op)
+					continue
+				}
+
+				// 更新状态机
+				lastNum := len(sc.configs) - 1
+				groups := make(map[int][]string)
+				for k, v := range sc.configs[lastNum].Groups {
+					groups[k] = v
+				}
+				if op.Op == OpJoin {
+					for gid, servers := range op.Servers {
+						groups[gid] = servers
+					}
+					newShards := sc.balanceShard(groups)
+					sc.configs = append(sc.configs, Config{
+						Num:    lastNum + 1,
+						Shards: newShards,
+						Groups: groups,
+					})
+					sc.DPrintf("config %d is %+v", lastNum+1, sc.configs[lastNum+1])
+				} else if op.Op == OpLeave {
+					for idx := range op.GIDs {
+						gid := op.GIDs[idx]
+						if _, ok := groups[gid]; ok {
+							delete(groups, gid)
+						}
+					}
+					newShards := sc.balanceShard(groups)
+					sc.configs = append(sc.configs, Config{
+						Num:    lastNum + 1,
+						Shards: newShards,
+						Groups: groups,
+					})
+					sc.DPrintf("config %d is %+v", lastNum+1, sc.configs[lastNum+1])
+				} else if op.Op == OpMove {
+					shardsMap := sc.configs[lastNum].Shards
+					if op.Shard < 0 || op.Shard > NShards-1 {
+						sc.DPrintf("move args error")
+						sc.Kill()
+						return
+					}
+					if _, ok := groups[op.GID]; ok {
+						shardsMap[op.Shard] = op.GID
+						sc.configs = append(sc.configs, Config{
+							Num:    lastNum + 1,
+							Shards: shardsMap,
+							Groups: sc.configs[lastNum].Groups,
+						})
+						sc.DPrintf("config %d is %+v", lastNum+1, sc.configs[lastNum+1])
+					} else {
+						sc.DPrintf("undo move %d %d", op.Shard, op.GID)
+					}
+				} else {
+					var idx int
+					if op.Num == -1 || idx > lastNum {
+						idx = lastNum
+					} else {
+						idx = op.Num
+					}
+					reply.Config = sc.configs[idx]
+					sc.DPrintf("query config %d is %+v", idx, reply.Config)
+				}
+
+				sc.Lock("replyCommand")
+				if op.Op != OpQuery {
+					sc.updateDupReqHistory(op.ClientId, op.SequenceNum)
+				}
+
+				if _, ok := sc.notifyChans[applyLog.CommandIndex]; ok {
+					select {
+					case sc.notifyChans[applyLog.CommandIndex] <- reply:
+					default:
+						sc.DPrintf("reply to chan index %d failed", applyLog.CommandIndex)
+					}
+				}
+				sc.Unlock("replyCommand")
+			} else {
+				sc.DPrintf(fmt.Sprintf("[panic] unexpected applyLog %v", applyLog))
+				sc.Kill()
+				return
+			}
+		default:
+			continue
+		}
+	}
+}
+```
+
+这里的点在于配置更新后，要平均负载，并尽可能地少移动数据，思路就是，先统计配置更新后无人负责的分片，并将他们分配给负载最低的 gid，然后再循环找出最大和最小负载，如果他们差值为 1 或 0，那么就表示已经平衡了，否则把负载最大的分片分一部分给最小负载的 gid。
+
+```go
+func (sc *ShardCtrler) balanceShard(groups map[int][]string) [NShards]int {
+	lastNum := len(sc.configs) - 1
+	shardMap := sc.configs[lastNum].Shards
+	// 现在没有可用服务器
+	if len(groups) == 0 {
+		sc.DPrintf("No servers available now")
+		for idx := range shardMap {
+			shardMap[idx] = 0
+		}
+		return shardMap
+	}
+
+	// 统计当前服务器负载分布
+	gidShardLoadInfo := make(map[int][]int)
+	keys := make([]int, 0)
+	for gid, _ := range groups {
+		gidShardLoadInfo[gid] = make([]int, 0)
+		keys = append(keys, gid)
+	}
+	sort.Ints(keys)
+
+	noGidShardList := make([]int, 0)
+	for idx := range shardMap {
+		gid := shardMap[idx]
+		if gid == 0 {
+			noGidShardList = append(noGidShardList, idx)
+			continue
+		}
+		if _, ok := gidShardLoadInfo[gid]; ok {
+			// 记录 GID 负责的 shard
+			gidShardLoadInfo[gid] = append(gidShardLoadInfo[gid], idx)
+		} else {
+			noGidShardList = append(noGidShardList, idx)
+		}
+	}
+	sc.DPrintf("gidShardLoadInfo: %+v", gidShardLoadInfo)
+	sc.DPrintf("noGidShardList: %v", noGidShardList)
+
+	// 不再工作的 GID 把它的 shard 分配给当前 shard 负载最低的 GID
+	if len(noGidShardList) > 0 {
+		for i := range noGidShardList {
+			shard := noGidShardList[i]
+			minLoad := NShards + 1
+			minLoadGid := 0
+			for j := range keys {
+				gid := keys[j]
+				info := gidShardLoadInfo[gid]
+				if len(info) < minLoad {
+					minLoad = len(info)
+					minLoadGid = gid
+				}
+			}
+			gidShardLoadInfo[minLoadGid] = append(gidShardLoadInfo[minLoadGid], shard)
+		}
+		sc.DPrintf("gidShardLoadInfo after allocate noGidShardList: %+v", gidShardLoadInfo)
+	}
+
+	// 平均每个 GID 的负载，每次均衡最大和最小负载的 GID，直到他们差值为 1 或 0
+	for {
+		minLoadGid, maxLoadGid := 0, 0
+		minLoad, maxLoad := NShards+1, -1
+		for i := range keys {
+			gid := keys[i]
+			info := gidShardLoadInfo[gid]
+			if len(info) < minLoad {
+				minLoad = len(info)
+				minLoadGid = gid
+			}
+			if len(info) > maxLoad {
+				maxLoad = len(info)
+				maxLoadGid = gid
+			}
+		}
+
+		if maxLoad-minLoad < 2 {
+			break
+		} else {
+			for maxLoad-minLoad > 1 {
+				idx := len(gidShardLoadInfo[maxLoadGid]) - 1
+				balanceShard := gidShardLoadInfo[maxLoadGid][idx]
+				gidShardLoadInfo[maxLoadGid] = gidShardLoadInfo[maxLoadGid][:idx]
+				maxLoad -= 1
+
+				gidShardLoadInfo[minLoadGid] = append(gidShardLoadInfo[minLoadGid], balanceShard)
+				minLoad += 1
+			}
+		}
+	}
+
+	sc.DPrintf("gidShardLoadInfo after balance: %+v", gidShardLoadInfo)
+
+	// 生成 shardMap
+	for gid, info := range gidShardLoadInfo {
+		for i := range info {
+			shardMap[info[i]] = gid
+		}
+	}
+	sc.DPrintf("shardMap: %v", shardMap)
+	return shardMap
+}
+```
+
+
+
+
+
+# Part B 设计思路
+
+
+
+
+
+
+
+
 
 
 
