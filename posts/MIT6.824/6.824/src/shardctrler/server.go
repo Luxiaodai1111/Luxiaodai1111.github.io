@@ -327,7 +327,7 @@ func (sc *ShardCtrler) handleApply() {
 					}
 				} else {
 					var idx int
-					if op.Num == -1 || idx > lastNum {
+					if op.Num == -1 || op.Num > lastNum {
 						idx = lastNum
 					} else {
 						idx = op.Num

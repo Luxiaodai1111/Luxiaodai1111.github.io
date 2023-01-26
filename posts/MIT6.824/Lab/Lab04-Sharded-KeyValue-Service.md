@@ -305,7 +305,7 @@ func (sc *ShardCtrler) handleApply() {
 					}
 				} else {
 					var idx int
-					if op.Num == -1 || idx > lastNum {
+					if op.Num == -1 || op.Num > lastNum {
 						idx = lastNum
 					} else {
 						idx = op.Num
@@ -463,6 +463,7 @@ Part B 算是整个实验最复杂的部分了，我们先来理清一下思路�
 - 客户端发送请求时需要携带配置的序号，只有客户端和服务端分片处于同一配置时才可正常工作
   - 如果客户端配置高，那么服务端要立刻去查询新配置，并进行迁移
   - 如果服务端配置比较高，那么返回错误让客户端去更新配置
+- 只有 leader 将配置更新写入日志，但是可能会重复写入，所以 apply 时要处理重复的配置更新日志
 
 
 

@@ -21,7 +21,7 @@ import "time"
 
 func (ck *Clerk) DPrintf(format string, a ...interface{}) {
 	if Debug {
-		log.Printf(fmt.Sprintf("[ShardKV Clerk]:%s", format), a...)
+		log.Printf(fmt.Sprintf("[ShardKV Clerk %d]:%s", ck.clientId, format), a...)
 	}
 	return
 }
@@ -80,14 +80,14 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 // You will have to modify this function.
 //
 func (ck *Clerk) Get(key string) string {
-	ck.DPrintf("=== request get key: %s ===", key)
-
-	args := CommonArgs{
+	args := CommandArgs{
 		Key:         key,
 		Op:          OpGet,
 		ClientId:    ck.clientId,
 		SequenceNum: atomic.AddInt64(&ck.maxSequenceNum, 1),
 	}
+
+	ck.DPrintf("=== request %d get key: %s ===", args.SequenceNum, key)
 
 	for {
 		shard := key2shard(key)
@@ -96,13 +96,18 @@ func (ck *Clerk) Get(key string) string {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
+			retry:
 				var reply CommonReply
 				ok := srv.Call("ShardKV.Get", &args, &reply)
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
+					ck.DPrintf("=== request %d get key: %s success ===", args.SequenceNum, key)
 					return reply.Value
 				}
 				if ok && (reply.Err == ErrWrongGroup) {
 					break
+				}
+				if ok && (reply.Err) == ErrRetry {
+					goto retry
 				}
 				// ... not ok, or ErrWrongLeader
 			}
@@ -120,15 +125,15 @@ func (ck *Clerk) Get(key string) string {
 // You will have to modify this function.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	ck.DPrintf("=== request %s <%s>:<%s> ===", op, key, value)
-
-	args := CommonArgs{
+	args := CommandArgs{
 		Key:         key,
 		Value:       value,
 		Op:          op,
 		ClientId:    ck.clientId,
 		SequenceNum: atomic.AddInt64(&ck.maxSequenceNum, 1),
 	}
+
+	ck.DPrintf("=== request %d %s <%s>:<%s> ===", args.SequenceNum, op, key, value)
 
 	for {
 		shard := key2shard(key)
@@ -139,6 +144,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				var reply CommonReply
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
 				if ok && reply.Err == OK {
+					ck.DPrintf("=== request %d %s <%s>:<%s> success ===", args.SequenceNum, op, key, value)
 					return
 				}
 				if ok && reply.Err == ErrWrongGroup {
