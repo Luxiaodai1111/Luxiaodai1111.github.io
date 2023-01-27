@@ -76,6 +76,8 @@ func (kv *ShardKV) updateDupLog(logType string, k1, k2 int64) {
 		dupMap = kv.dupReconfig
 	} else if logType == PullShardLog {
 		dupMap = kv.dupPullShard
+	} else if logType == UpdateShardLog {
+		dupMap = kv.dupUpdateShard
 	}
 	if _, ok := dupMap[k1]; !ok {
 		dupMap[k1] = make(map[int64]struct{})
@@ -93,6 +95,8 @@ func (kv *ShardKV) isDuplicateLog(logType string, k1, k2 int64) bool {
 		dupMap = kv.dupReconfig
 	} else if logType == PullShardLog {
 		dupMap = kv.dupPullShard
+	} else if logType == UpdateShardLog {
+		dupMap = kv.dupUpdateShard
 	}
 	if _, ok := dupMap[k1]; ok {
 		if _, ok := dupMap[k1][k2]; ok {

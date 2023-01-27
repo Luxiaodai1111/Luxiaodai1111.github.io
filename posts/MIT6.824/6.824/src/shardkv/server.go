@@ -59,10 +59,11 @@ func (kv *ShardKV) RUnlock(owner string) {
 }
 
 type Op struct {
-	LogType          string
-	CommandArgs      *CommandArgs
-	ReConfigLogArgs  *ReConfigLogArgs
-	PullShardLogArgs *PullShardLogArgs
+	LogType            string
+	CommandArgs        *CommandArgs
+	ReConfigLogArgs    *ReConfigLogArgs
+	PullShardLogArgs   *PullShardLogArgs
+	UpdateShardLogArgs *UpdateShardLogArgs
 }
 
 type ShardState struct {
@@ -96,6 +97,7 @@ type ShardKV struct {
 	dupCommand     map[int64]map[int64]struct{} // 记录已经执行的修改命令，防止重复执行
 	dupReconfig    map[int64]map[int64]struct{}
 	dupPullShard   map[int64]map[int64]struct{}
+	dupUpdateShard map[int64]map[int64]struct{}
 }
 
 func (kv *ShardKV) checkShard(key string, reply *CommonReply) bool {
@@ -152,16 +154,20 @@ func (kv *ShardKV) pullShard(prevCfg shardctrler.Config, shard, prevGID int) {
 			srv := kv.make_end(gidServers[si])
 			var reply PullShardReply
 			ok := srv.Call("ShardKV.PullShard", &args, &reply)
-			if ok && (reply.Err == OK) {
-				kv.Lock("pullShard")
-				for k, v := range reply.Data {
-					kv.db[k] = v
+			if ok {
+				if reply.Err == OK {
+					kv.DPrintf("=== pullShard %d from %d success, cfg num up to %d ===", shard, prevGID, kv.shardState[args.Shard].currentCfg.Num)
+					// 写入拉取成功日志
+					kv.WriteLog(UpdateShardLog, UpdateShardLogArgs{
+						Shard:       shard,
+						ShardCfgNum: prevCfg.Num,
+						Data:        reply.Data,
+					})
+					return
+				} else if reply.Err == ErrDupPull {
+					kv.DPrintf("=== dup pullShard %d from %d ===", shard, prevGID)
+					return
 				}
-				kv.DPrintf("=== pullShard %d from %d success, cfg num up to %d ===", shard, prevGID, kv.shardState[args.Shard].currentCfg.Num)
-				kv.shardState[shard].state = Working
-				kv.Unlock("pullShard")
-				// TODO: 写入拉取成功日志
-				return
 			}
 		}
 
@@ -189,6 +195,12 @@ func (kv *ShardKV) WriteLog(logType string, args interface{}) {
 					goto logTypePanic
 				}
 				kv.PullShardLog(&pullShardLogArgs, &reply)
+			} else if logType == UpdateShardLog {
+				updateShardLogArgs, ok := args.(UpdateShardLogArgs)
+				if !ok {
+					goto logTypePanic
+				}
+				kv.UpdateShardLog(&updateShardLogArgs, &reply)
 			} else {
 				goto logTypePanic
 			}
@@ -203,9 +215,23 @@ func (kv *ShardKV) WriteLog(logType string, args interface{}) {
 				var reply CommonReply
 				var ok bool
 				if logType == ReConfigLog {
-					ok = srv.Call("ShardKV.ReConfigLog", &args, &reply)
+					reConfigLogArgs, ok := args.(ReConfigLogArgs)
+					if !ok {
+						goto logTypePanic
+					}
+					ok = srv.Call("ShardKV.ReConfigLog", &reConfigLogArgs, &reply)
 				} else if logType == PullShardLog {
-					ok = srv.Call("ShardKV.PullShardLog", &args, &reply)
+					pullShardLogArgs, ok := args.(PullShardLogArgs)
+					if !ok {
+						goto logTypePanic
+					}
+					ok = srv.Call("ShardKV.PullShardLog", &pullShardLogArgs, &reply)
+				} else if logType == UpdateShardLog {
+					updateShardLogArgs, ok := args.(UpdateShardLogArgs)
+					if !ok {
+						goto logTypePanic
+					}
+					ok = srv.Call("ShardKV.UpdateShardLog", &updateShardLogArgs, &reply)
 				} else {
 					goto logTypePanic
 				}
@@ -334,6 +360,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	labgob.Register(CommandArgs{})
 	labgob.Register(ReConfigLogArgs{})
 	labgob.Register(PullShardLogArgs{})
+	labgob.Register(UpdateShardLogArgs{})
 
 	kv := new(ShardKV)
 	kv.me = me
@@ -368,6 +395,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.dupCommand = make(map[int64]map[int64]struct{})
 	kv.dupReconfig = make(map[int64]map[int64]struct{})
 	kv.dupPullShard = make(map[int64]map[int64]struct{})
+	kv.dupUpdateShard = make(map[int64]map[int64]struct{})
 
 	go kv.updateConfig()       // 负责从 shardctrler 拉取配置，写入配置更新日志
 	go kv.updatePullShardLog() // 负责写入配置更改日志

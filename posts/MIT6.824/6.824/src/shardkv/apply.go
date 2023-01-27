@@ -62,8 +62,10 @@ replyCommand:
 		dupReqHistorySnap := kv.makeDupLogHistorySnap(kv.dupCommand)
 		dupReconfigHistorySnap := kv.makeDupLogHistorySnap(kv.dupReconfig)
 		dupPullShardHistorySnap := kv.makeDupLogHistorySnap(kv.dupPullShard)
+		dupUpdateShardHistorySnap := kv.makeDupLogHistorySnap(kv.dupUpdateShard)
 		if e.Encode(kv.db) != nil || e.Encode(dupReqHistorySnap) != nil ||
-			e.Encode(dupReconfigHistorySnap) != nil || e.Encode(dupPullShardHistorySnap) != nil {
+			e.Encode(dupReconfigHistorySnap) != nil || e.Encode(dupPullShardHistorySnap) != nil ||
+			e.Encode(dupUpdateShardHistorySnap) != nil {
 			kv.DPrintf("[panic] encode snap error")
 			kv.Unlock("snap")
 			kv.Kill()
@@ -158,6 +160,35 @@ replyCommand:
 	kv.Unlock("replyCommand")
 }
 
+func (kv *ShardKV) applyUpdateShard(args *UpdateShardLogArgs, applyLogIndex int) {
+	reply := &CommonReply{Err: OK}
+
+	// 防止重复应用同一条修改命令
+	if kv.isDuplicateLog(UpdateShardLog, int64(args.Shard), int64(args.ShardCfgNum)) {
+		kv.DPrintf("found duplicate updateShard request: %+v", args)
+		goto replyCommand
+	}
+
+	kv.Lock("updateShard")
+	kv.updateDupLog(PullShardLog, int64(args.Shard), int64(args.ShardCfgNum))
+	kv.shardState[args.Shard].state = Working
+	for k, v := range args.Data {
+		kv.db[k] = v
+	}
+	kv.Unlock("updateShard")
+
+replyCommand:
+	kv.Lock("replyCommand")
+	if _, ok := kv.notifyChans[applyLogIndex]; ok {
+		select {
+		case kv.notifyChans[applyLogIndex] <- reply:
+		default:
+			kv.DPrintf("reply to chan index %d failed", applyLogIndex)
+		}
+	}
+	kv.Unlock("replyCommand")
+}
+
 func (kv *ShardKV) handleApply() {
 	for kv.killed() == false {
 		select {
@@ -190,6 +221,10 @@ func (kv *ShardKV) handleApply() {
 					kv.DPrintf("recieve pull shard apply log: %d, PullShardLogArgs: %+v",
 						applyLog.CommandIndex, op.PullShardLogArgs)
 					kv.applyPullShard(op.PullShardLogArgs, applyLog.CommandIndex)
+				} else if op.LogType == UpdateShardLog {
+					kv.DPrintf("recieve update shard apply log: %d, UpdateShardLogArgs: %+v",
+						applyLog.CommandIndex, op.UpdateShardLogArgs)
+					kv.applyUpdateShard(op.UpdateShardLogArgs, applyLog.CommandIndex)
 				} else {
 					kv.DPrintf("[panic] unexpected LogType %+v", op)
 					kv.Kill()
@@ -210,8 +245,10 @@ func (kv *ShardKV) handleApply() {
 				var dupReqHistorySnap DupHistorySnap
 				var dupReconfigHistorySnap DupHistorySnap
 				var dupPullShardHistorySnap DupHistorySnap
+				var dupUpdateShardHistorySnap DupHistorySnap
 				if d.Decode(&kv.db) != nil || d.Decode(&dupReqHistorySnap) != nil ||
-					d.Decode(&dupReconfigHistorySnap) != nil || d.Decode(&dupPullShardHistorySnap) != nil {
+					d.Decode(&dupReconfigHistorySnap) != nil || d.Decode(&dupPullShardHistorySnap) != nil ||
+					d.Decode(&dupUpdateShardHistorySnap) != nil {
 					kv.DPrintf("[panic] decode snap error")
 					kv.Unlock("applySnap")
 					kv.Kill()
@@ -220,6 +257,7 @@ func (kv *ShardKV) handleApply() {
 				kv.dupCommand = kv.restoreDupHistorySnap(dupReqHistorySnap)
 				kv.dupReconfig = kv.restoreDupHistorySnap(dupReconfigHistorySnap)
 				kv.dupPullShard = kv.restoreDupHistorySnap(dupPullShardHistorySnap)
+				kv.dupUpdateShard = kv.restoreDupHistorySnap(dupUpdateShardHistorySnap)
 				kv.Unlock("applySnap")
 
 				// lastApplyIndex 到快照之间的修改请求一定会包含在查重哈希表里

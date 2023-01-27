@@ -165,8 +165,56 @@ func (kv *ShardKV) PullShardLog(args *PullShardLogArgs, reply *CommonReply) {
 		reply.Err = ErrTimeout
 	}
 
-	kv.Lock("PullShard")
-	defer kv.Unlock("PullShard")
+	kv.Lock("PullShardLog")
+	defer kv.Unlock("PullShardLog")
+	close(kv.notifyChans[index])
+	delete(kv.notifyChans, index)
+}
+
+func (kv *ShardKV) UpdateShardLog(args *UpdateShardLogArgs, reply *CommonReply) {
+	if kv.isDuplicateLog(UpdateShardLog, int64(args.Shard), int64(args.ShardCfgNum)) {
+		kv.DPrintf("duplicate update shard request: %+v, reply history response", args)
+		reply.Err = OK
+		return
+	}
+
+	index, term, isLeader := kv.rf.Start(Op{
+		LogType:            UpdateShardLog,
+		UpdateShardLogArgs: args,
+	})
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	kv.Lock("getNotifyChan")
+	if _, ok := kv.notifyChans[index]; !ok {
+		kv.notifyChans[index] = make(chan *CommonReply)
+	}
+	kv.Unlock("getNotifyChan")
+
+	select {
+	case result := <-kv.notifyChans[index]:
+		currentTerm, isleader := kv.rf.GetState()
+		if !isleader || currentTerm != term {
+			reply.Err = ErrWrongLeader
+			kv.DPrintf("reply now is not leader")
+			return
+		}
+		kv.DPrintf("reply pull shard index: %d", index)
+
+		if reply.Err == ApplySnap {
+			reply.Err = ErrRetry
+		} else {
+			reply.Err, reply.Value = result.Err, result.Value
+		}
+	case <-time.After(ExecuteTimeout):
+		kv.DPrintf("wait pull shard apply log %d time out", index)
+		reply.Err = ErrTimeout
+	}
+
+	kv.Lock("UpdateShardLog")
+	defer kv.Unlock("UpdateShardLog")
 	close(kv.notifyChans[index])
 	delete(kv.notifyChans, index)
 }
@@ -201,8 +249,9 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 		kv.DPrintf("=== reply pullShard %d success, cfg num up to %d ===", args.Shard, kv.shardState[args.Shard].currentCfg.Num)
 		kv.shardState[args.Shard].state = Working
 		// TODO: 写入删除分片日志
+	} else if args.PrevCfg.Num < actualShardCfgNum {
+		reply.Err = ErrDupPull
+	} else {
+		reply.Err = ErrRetry
 	}
-
-	reply.Err = ErrRetry
-
 }

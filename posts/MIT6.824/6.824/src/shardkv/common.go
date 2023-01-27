@@ -21,6 +21,7 @@ const (
 	ErrWrongLeader = "ErrWrongLeader"
 	ErrTimeout     = "ErrTimeout"
 	ErrRetry       = "ErrRetry"
+	ErrDupPull     = "ErrDupPull"
 
 	ApplySnap = "ApplySnap"
 
@@ -36,13 +37,10 @@ const (
 	ReConfining     = "ReConfining"
 
 	// 日志类型
-	CommandLog   = "CommandLog"
-	ReConfigLog  = "ReConfigLog"
-	PullShardLog = "PullShardLog"
-
-	// ReConfigArgs op
-	Push = "Push"
-	Pull = "Pull"
+	CommandLog     = "CommandLog"
+	ReConfigLog    = "ReConfigLog"
+	PullShardLog   = "PullShardLog"
+	UpdateShardLog = "UpdateShardLog"
 )
 
 type Err string
@@ -52,6 +50,12 @@ type PullShardArgs = PullShardLogArgs
 type PullShardReply struct {
 	Err  Err
 	Data map[string]string
+}
+
+type UpdateShardLogArgs struct {
+	Shard       int // 更改的分片
+	ShardCfgNum int
+	Data        map[string]string
 }
 
 type PullShardLogArgs struct {
