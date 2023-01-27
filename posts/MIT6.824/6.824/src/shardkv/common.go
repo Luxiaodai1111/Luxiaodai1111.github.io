@@ -1,6 +1,9 @@
 package shardkv
 
-import "time"
+import (
+	"6.824/shardctrler"
+	"time"
+)
 
 //
 // Sharded key/value server.
@@ -33,8 +36,9 @@ const (
 	ReConfining     = "ReConfining"
 
 	// 日志类型
-	CommandLog  = "CommandLog"
-	ReConfigLog = "ReConfigLog"
+	CommandLog   = "CommandLog"
+	ReConfigLog  = "ReConfigLog"
+	PullShardLog = "PullShardLog"
 
 	// ReConfigArgs op
 	Push = "Push"
@@ -43,16 +47,22 @@ const (
 
 type Err string
 
-type PushShardArgs struct {
-	Data        map[string]string
-	Shard       int // 更改的分片
-	ShardCfgNum int // 变更前的配置序号
+type PullShardArgs = PullShardLogArgs
+
+type PullShardReply struct {
+	Err  Err
+	Data map[string]string
 }
 
-type ReConfigArgs struct {
-	Server string // GID + kv.me, just debug
-	Shard  int    // 更改的分片
-	Num    int    // 变更前的配置序号
+type PullShardLogArgs struct {
+	Shard     int // 更改的分片
+	PrevCfg   shardctrler.Config
+	UpdateCfg shardctrler.Config
+}
+
+type ReConfigLogArgs struct {
+	PrevCfg   shardctrler.Config
+	UpdateCfg shardctrler.Config
 }
 
 type CommandArgs struct {
