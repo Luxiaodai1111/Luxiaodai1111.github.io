@@ -235,7 +235,6 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 		actualShardCfgNum = kv.shardState[args.Shard].prevCfg.Num
 	}
 	kv.DPrintf("now state: %s, %d, %d", kv.shardState[args.Shard].state, args.PrevCfg.Num, actualShardCfgNum)
-	// TODO: 处理重复请求
 	if args.PrevCfg.Num == actualShardCfgNum {
 		data := make(map[string]string)
 		for k, v := range kv.db {

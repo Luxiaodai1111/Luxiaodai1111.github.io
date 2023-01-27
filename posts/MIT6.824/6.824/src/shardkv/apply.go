@@ -170,7 +170,7 @@ func (kv *ShardKV) applyUpdateShard(args *UpdateShardLogArgs, applyLogIndex int)
 	}
 
 	kv.Lock("updateShard")
-	kv.updateDupLog(PullShardLog, int64(args.Shard), int64(args.ShardCfgNum))
+	kv.updateDupLog(UpdateShardLog, int64(args.Shard), int64(args.ShardCfgNum))
 	kv.shardState[args.Shard].state = Working
 	for k, v := range args.Data {
 		kv.db[k] = v
