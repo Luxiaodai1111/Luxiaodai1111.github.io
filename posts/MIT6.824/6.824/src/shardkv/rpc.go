@@ -10,6 +10,7 @@ func (kv *ShardKV) Command(args *CommandArgs, reply *CommonReply) {
 	}
 
 	if kv.checkShard(args.Key, reply) {
+		kv.DPrintf("checkShard reply request %s %s: %s", args.Op, args.Key, reply.Err)
 		return
 	}
 
@@ -89,7 +90,6 @@ func (kv *ShardKV) ReConfigLog(args *ReConfigLogArgs, reply *CommonReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	kv.DPrintf("ReConfigLog %d", index)
 
 	kv.Lock("getNotifyChan")
 	if _, ok := kv.notifyChans[index]; !ok {
@@ -138,7 +138,6 @@ func (kv *ShardKV) PullShardLog(args *PullShardLogArgs, reply *CommonReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	kv.DPrintf("PullShardLog %d", index)
 
 	kv.Lock("getNotifyChan")
 	if _, ok := kv.notifyChans[index]; !ok {
@@ -173,12 +172,23 @@ func (kv *ShardKV) PullShardLog(args *PullShardLogArgs, reply *CommonReply) {
 }
 
 func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
+	_, isleader := kv.rf.GetState()
+	if !isleader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
 	kv.Lock("PullShard")
 	defer kv.Unlock("PullShard")
 
-	// 正常工作可能还会接收新的请求，所以也要等配置变化时才能返回数据
-	// 本服务器可能还在等待前面的分片，所以这里要检查配置序号
-	if kv.shardState[args.Shard].state != Working && args.PrevCfg.Num == kv.shardState[args.Shard].prevCfg.Num {
+	kv.DPrintf("recv pullShard %d request: ", args.Shard)
+	actualShardCfgNum := kv.shardState[args.Shard].currentCfg.Num
+	if kv.shardState[args.Shard].state != Working {
+		actualShardCfgNum = kv.shardState[args.Shard].prevCfg.Num
+	}
+	kv.DPrintf("now state: %s, %d, %d", kv.shardState[args.Shard].state, args.PrevCfg.Num, actualShardCfgNum)
+	// TODO: 处理重复请求
+	if args.PrevCfg.Num == actualShardCfgNum {
 		data := make(map[string]string)
 		for k, v := range kv.db {
 			if key2shard(k) == args.Shard {
@@ -188,6 +198,7 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 		reply.Err = OK
 		reply.Data = data
 		// 每个分片拉取或被拉取成功都表示这个分片可以开始服务了
+		kv.DPrintf("=== reply pullShard %d success, cfg num up to %d ===", args.Shard, kv.shardState[args.Shard].currentCfg.Num)
 		kv.shardState[args.Shard].state = Working
 		// TODO: 写入删除分片日志
 	}

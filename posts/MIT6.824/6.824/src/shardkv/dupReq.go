@@ -5,10 +5,10 @@ import (
 	"strings"
 )
 
-type DupReqHistorySnap map[int64]string
+type DupHistorySnap map[int64]string
 
-func (kv *ShardKV) makeDupLogHistorySnap(dupMap map[int64]map[int64]struct{}) DupReqHistorySnap {
-	snap := make(DupReqHistorySnap, 0)
+func (kv *ShardKV) makeDupLogHistorySnap(dupMap map[int64]map[int64]struct{}) DupHistorySnap {
+	snap := make(DupHistorySnap, 0)
 	for clientId, info := range dupMap {
 		var seqs []int64
 		for sequenceNum := range info {
@@ -44,7 +44,7 @@ func (kv *ShardKV) makeDupLogHistorySnap(dupMap map[int64]map[int64]struct{}) Du
 	return snap
 }
 
-func (kv *ShardKV) restoreDupHistorySnap(snap DupReqHistorySnap) map[int64]map[int64]struct{} {
+func (kv *ShardKV) restoreDupHistorySnap(snap DupHistorySnap) map[int64]map[int64]struct{} {
 	dupMap := make(map[int64]map[int64]struct{})
 	for clientId, info := range snap {
 		if _, ok := dupMap[clientId]; !ok {

@@ -3,7 +3,6 @@ package shardkv
 import (
 	"6.824/labgob"
 	"bytes"
-	"fmt"
 )
 
 func (kv *ShardKV) applyCommand(command *CommandArgs, applyLogIndex int) {
@@ -89,9 +88,9 @@ func (kv *ShardKV) applyReConfig(args *ReConfigLogArgs, applyLogIndex int) {
 	kv.Lock("applyReConfig")
 	if args.UpdateCfg.Num == len(kv.configs) {
 		kv.configs = append(kv.configs, args.UpdateCfg)
+		kv.DPrintf("update configs: %+v", kv.configs)
 	}
 	kv.updateDupLog(ReConfigLog, int64(args.PrevCfg.Num), int64(args.UpdateCfg.Num))
-	kv.DPrintf("update configs: %+v", kv.configs)
 	kv.Unlock("applyReConfig")
 
 replyCommand:
@@ -126,12 +125,21 @@ func (kv *ShardKV) applyPullShard(args *PullShardLogArgs, applyLogIndex int) {
 	nowGID = kv.shardState[args.Shard].currentCfg.Shards[args.Shard]
 	if nowGID == kv.gid {
 		if prevGID == kv.gid || prevGID == 0 {
+			kv.DPrintf("shard %d not change: cfg num up to %d", args.Shard, kv.shardState[args.Shard].currentCfg.Num)
 			kv.shardState[args.Shard].state = Working
 		} else {
 			go kv.pullShard(*kv.shardState[args.Shard].prevCfg, args.Shard, prevGID)
 		}
+	} else {
+		if prevGID != kv.gid {
+			kv.DPrintf("shard %d not change: cfg num up to %d", args.Shard, kv.shardState[args.Shard].currentCfg.Num)
+			kv.shardState[args.Shard].state = Working
+		} else {
+			// 等待被拉取分片
+		}
 	}
 	if prevGID == kv.gid && nowGID == 0 {
+		kv.Unlock("checkShard")
 		kv.DPrintf("[panic] nowGID is 0")
 		kv.Kill()
 		return
@@ -183,7 +191,7 @@ func (kv *ShardKV) handleApply() {
 						applyLog.CommandIndex, op.PullShardLogArgs)
 					kv.applyPullShard(op.PullShardLogArgs, applyLog.CommandIndex)
 				} else {
-					kv.DPrintf(fmt.Sprintf("[panic] unexpected LogType %v", op))
+					kv.DPrintf("[panic] unexpected LogType %+v", op)
 					kv.Kill()
 					return
 				}
@@ -199,9 +207,9 @@ func (kv *ShardKV) handleApply() {
 				d := labgob.NewDecoder(r)
 				kv.Lock("applySnap")
 				kv.db = make(map[string]string)
-				var dupReqHistorySnap DupReqHistorySnap
-				var dupReconfigHistorySnap DupReqHistorySnap
-				var dupPullShardHistorySnap DupReqHistorySnap
+				var dupReqHistorySnap DupHistorySnap
+				var dupReconfigHistorySnap DupHistorySnap
+				var dupPullShardHistorySnap DupHistorySnap
 				if d.Decode(&kv.db) != nil || d.Decode(&dupReqHistorySnap) != nil ||
 					d.Decode(&dupReconfigHistorySnap) != nil || d.Decode(&dupPullShardHistorySnap) != nil {
 					kv.DPrintf("[panic] decode snap error")
@@ -231,7 +239,7 @@ func (kv *ShardKV) handleApply() {
 				kv.Unlock("replyCommand")
 				kv.lastApplyIndex = applyLog.SnapshotIndex
 			} else {
-				kv.DPrintf(fmt.Sprintf("[panic] unexpected applyLog %v", applyLog))
+				kv.DPrintf("[panic] unexpected applyLog %+v", applyLog)
 				kv.Kill()
 				return
 			}

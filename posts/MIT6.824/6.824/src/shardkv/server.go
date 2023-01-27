@@ -108,7 +108,7 @@ func (kv *ShardKV) checkShard(key string, reply *CommonReply) bool {
 		// 当前分片不由 gid 负责
 		if shardInfo.currentCfg.Shards[shard] != kv.gid {
 			reply.Err = ErrWrongGroup
-			kv.DPrintf("shard %d response %s", shard, reply.Err)
+			kv.DPrintf("key %s shard %d response %s", key, shard, reply.Err)
 			return true
 		}
 	} else {
@@ -116,20 +116,20 @@ func (kv *ShardKV) checkShard(key string, reply *CommonReply) bool {
 			// 之前不负责，现在需要负责的分片，等待分片传输完成再服务
 			if shardInfo.prevCfg.Shards[shard] != kv.gid && shardInfo.currentCfg.Shards[shard] == kv.gid {
 				reply.Err = ErrRetry
-				kv.DPrintf("Waiting for shard %d migration", shard)
+				kv.DPrintf("Waiting for key %s shard %d migration", key, shard)
 				return true
 			}
 			// 之前负责，现在不负责的分片，在开始 reconfig 后需要丢弃
 			if shardInfo.prevCfg.Shards[shard] == kv.gid && shardInfo.currentCfg.Shards[shard] != kv.gid {
 				reply.Err = ErrWrongGroup
-				kv.DPrintf("The shard %d after ReConfining needs to be discard", shard)
+				kv.DPrintf("The key %s shard %d after ReConfining needs to be discard", key, shard)
 				return true
 			}
 		} else {
 			// 在 ReConfining 之前负责的分片需要处理
 			if shardInfo.prevCfg.Shards[shard] != kv.gid {
 				reply.Err = ErrWrongGroup
-				kv.DPrintf("The shard %d before ReConfining needs to be process", shard)
+				kv.DPrintf("The key %s shard %d before ReConfining needs to be process", key, shard)
 				return true
 			}
 		}
@@ -138,14 +138,14 @@ func (kv *ShardKV) checkShard(key string, reply *CommonReply) bool {
 	return false
 }
 
-func (kv *ShardKV) pullShard(prevCfg shardctrler.Config, shard, gid int) {
-	kv.DPrintf("=== pullShard %d from %v ===", shard, gid)
-	for kv.killed() {
+func (kv *ShardKV) pullShard(prevCfg shardctrler.Config, shard, prevGID int) {
+	kv.DPrintf("=== pullShard %d from %d ===", shard, prevGID)
+	for kv.killed() == false {
 		args := PullShardArgs{
 			Shard:   shard,
 			PrevCfg: prevCfg,
 		}
-		gidServers := args.PrevCfg.Groups[shard]
+		gidServers := args.PrevCfg.Groups[prevGID]
 
 		// try each server for the shard.
 		for si := 0; si < len(gidServers); si++ {
@@ -153,13 +153,14 @@ func (kv *ShardKV) pullShard(prevCfg shardctrler.Config, shard, gid int) {
 			var reply PullShardReply
 			ok := srv.Call("ShardKV.PullShard", &args, &reply)
 			if ok && (reply.Err == OK) {
-				kv.DPrintf("=== pullShard %d from %v success ===", shard, gid)
 				kv.Lock("pullShard")
 				for k, v := range reply.Data {
 					kv.db[k] = v
 				}
+				kv.DPrintf("=== pullShard %d from %d success, cfg num up to %d ===", shard, prevGID, kv.shardState[args.Shard].currentCfg.Num)
 				kv.shardState[shard].state = Working
 				kv.Unlock("pullShard")
+				// TODO: 写入拉取成功日志
 				return
 			}
 		}
@@ -170,7 +171,7 @@ func (kv *ShardKV) pullShard(prevCfg shardctrler.Config, shard, gid int) {
 
 // WriteLog 写入日志直到成功，重复写入也没关系，在 apply 处理即可
 func (kv *ShardKV) WriteLog(logType string, args interface{}) {
-	kv.DPrintf("===== write %s: %+v =====", logType, args)
+	//kv.DPrintf("===== write %s: %+v =====", logType, args)
 	writeLogSuccess := false
 	for !writeLogSuccess {
 		_, isleader := kv.rf.GetState()
@@ -213,7 +214,7 @@ func (kv *ShardKV) WriteLog(logType string, args interface{}) {
 					break
 				}
 				if ok && (reply.Err == ErrRetry) {
-					kv.DPrintf("retry write reConfig log")
+					kv.DPrintf("retry write %s", logType)
 					goto retry
 				}
 			}
@@ -260,7 +261,10 @@ func (kv *ShardKV) updateConfig() {
 			kv.WriteLog(ReConfigLog, args)
 
 			kv.Lock("updateConfig")
-			kv.configs = append(kv.configs, cfg)
+			if args.UpdateCfg.Num == len(kv.configs) {
+				kv.configs = append(kv.configs, args.UpdateCfg)
+			}
+			kv.DPrintf("update configs: %+v", kv.configs)
 			kv.Unlock("updateConfig")
 		} else {
 			kv.RUnlock("checkConfigUpdate")
