@@ -260,6 +260,8 @@ func (sc *ShardCtrler) handleApply() {
 				reply := &CommonReply{
 					Err: OK,
 				}
+				var lastNum int
+				groups := make(map[int][]string)
 
 				if applyLog.CommandIndex <= sc.lastApplyIndex {
 					// 比如 raft 重启了，就要重新 apply
@@ -273,12 +275,11 @@ func (sc *ShardCtrler) handleApply() {
 				// 防止重复应用同一条修改命令
 				if op.Op != OpQuery && sc.isDuplicateRequest(op.ClientId, op.SequenceNum) {
 					sc.DPrintf("found duplicate request: %+v", op)
-					continue
+					goto replyCommand
 				}
 
 				// 更新状态机
-				lastNum := len(sc.configs) - 1
-				groups := make(map[int][]string)
+				lastNum = len(sc.configs) - 1
 				for k, v := range sc.configs[lastNum].Groups {
 					groups[k] = v
 				}
@@ -336,6 +337,7 @@ func (sc *ShardCtrler) handleApply() {
 					sc.DPrintf("query config %d is %+v", idx, reply.Config)
 				}
 
+			replyCommand:
 				sc.Lock("replyCommand")
 				if op.Op != OpQuery {
 					sc.updateDupReqHistory(op.ClientId, op.SequenceNum)

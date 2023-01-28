@@ -3,16 +3,19 @@ package shardkv
 import "time"
 
 func (kv *ShardKV) Command(args *CommandArgs, reply *CommonReply) {
-	if args.Op != OpGet && kv.isDuplicateLog(CommandLog, args.ClientId, args.SequenceNum) {
+	if args.Op != OpGet && kv.isDuplicateLogWithLock(CommandLog, args.ClientId, args.SequenceNum) {
 		kv.DPrintf("duplicate command request: %+v, reply history response", args)
 		reply.Err = OK
 		return
 	}
 
+	kv.RLock("checkShard")
 	if kv.checkShard(args.Key, reply) {
+		kv.RUnlock("checkShard")
 		kv.DPrintf("checkShard reply request %s %s: %s", args.Op, args.Key, reply.Err)
 		return
 	}
+	kv.RUnlock("checkShard")
 
 	index, term, isLeader := kv.rf.Start(Op{
 		LogType:     CommandLog,
@@ -95,15 +98,15 @@ func (kv *ShardKV) replyCommon(index, term int, isLeader bool, reply *CommonRepl
 			kv.DPrintf("reply now is not leader")
 			return
 		}
-		kv.DPrintf("reply reConfig index: %d", index)
+		kv.DPrintf("reply index: %d", index)
 
 		if reply.Err == ApplySnap {
-			reply.Err = ErrRetry
+			reply.Err = OK
 		} else {
 			reply.Err, reply.Value = result.Err, result.Value
 		}
 	case <-time.After(ExecuteTimeout):
-		kv.DPrintf("wait reConfig apply log %d time out", index)
+		kv.DPrintf("wait apply log %d time out", index)
 		reply.Err = ErrTimeout
 	}
 
@@ -114,7 +117,7 @@ func (kv *ShardKV) replyCommon(index, term int, isLeader bool, reply *CommonRepl
 }
 
 func (kv *ShardKV) ReConfigLog(args *ReConfigLogArgs, reply *CommonReply) {
-	if kv.isDuplicateLog(ReConfigLog, int64(args.PrevCfg.Num), int64(args.UpdateCfg.Num)) {
+	if kv.isDuplicateLogWithLock(ReConfigLog, int64(args.PrevCfg.Num), int64(args.UpdateCfg.Num)) {
 		kv.DPrintf("duplicate reConfig request: %+v, reply history response", args)
 		reply.Err = OK
 		return
@@ -129,7 +132,7 @@ func (kv *ShardKV) ReConfigLog(args *ReConfigLogArgs, reply *CommonReply) {
 }
 
 func (kv *ShardKV) PullShardLog(args *PullShardLogArgs, reply *CommonReply) {
-	if kv.isDuplicateLog(PullShardLog, int64(args.Shard), int64(args.PrevCfg.Num)) {
+	if kv.isDuplicateLogWithLock(PullShardLog, int64(args.Shard), int64(args.PrevCfg.Num)) {
 		kv.DPrintf("duplicate pull shard request: %+v, reply history response", args)
 		reply.Err = OK
 		return
@@ -144,7 +147,7 @@ func (kv *ShardKV) PullShardLog(args *PullShardLogArgs, reply *CommonReply) {
 }
 
 func (kv *ShardKV) UpdateShardLog(args *UpdateShardLogArgs, reply *CommonReply) {
-	if kv.isDuplicateLog(UpdateShardLog, int64(args.Shard), int64(args.ShardCfgNum)) {
+	if kv.isDuplicateLogWithLock(UpdateShardLog, int64(args.Shard), int64(args.ShardCfgNum)) {
 		kv.DPrintf("duplicate update shard request: %+v, reply history response", args)
 		reply.Err = OK
 		return
@@ -174,7 +177,8 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 		actualShardCfgNum = kv.shardState[args.Shard].prevCfg.Num
 	}
 	kv.DPrintf("now state: %s, %d, %d", kv.shardState[args.Shard].state, args.PrevCfg.Num, actualShardCfgNum)
-	if kv.shardState[args.Shard].state == ReConfining && args.PrevCfg.Num == actualShardCfgNum {
+	// TODO: 考虑快照会导致状态跳变
+	if kv.shardState[args.Shard].state == ReConfining && args.PrevCfg.Num == kv.shardState[args.Shard].prevCfg.Num {
 		// 必须等到本服务器也开始迁移分片才能回复，否则数据库数据是不完全的
 		data := make(map[string]string)
 		for k, v := range kv.db {
@@ -187,7 +191,7 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 		// 每个分片拉取或被拉取成功都表示这个分片可以开始服务了
 		kv.DPrintf("=== reply pullShard %d success, cfg num up to %d ===", args.Shard, kv.shardState[args.Shard].currentCfg.Num)
 		kv.shardState[args.Shard].state = Working
-		// TODO: 写入删除分片日志
+		// TODO: 写入删除分片日志，同步 Working 状态
 	} else if args.PrevCfg.Num < actualShardCfgNum {
 		reply.Err = ErrDupPull
 	} else {

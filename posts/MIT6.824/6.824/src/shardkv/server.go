@@ -101,9 +101,6 @@ type ShardKV struct {
 }
 
 func (kv *ShardKV) checkShard(key string, reply *CommonReply) bool {
-	kv.RLock("checkShard")
-	defer kv.RUnlock("checkShard")
-
 	shard := key2shard(key)
 	shardInfo := kv.shardState[shard]
 	// 当前分片不由 gid 负责
@@ -265,8 +262,11 @@ func (kv *ShardKV) updateConfig() {
 }
 
 func (kv *ShardKV) updatePullShardLog() {
+	ticker := time.NewTicker(time.Millisecond * 100)
 	for kv.killed() == false {
-		time.Sleep(time.Millisecond)
+		select {
+		case <-ticker.C:
+		}
 
 		_, isleader := kv.rf.GetState()
 		if !isleader {
@@ -277,6 +277,7 @@ func (kv *ShardKV) updatePullShardLog() {
 		for shard, info := range kv.shardState {
 			if info.state == Working && kv.shardState[shard].currentCfg.Num+1 < len(kv.configs) {
 				kv.shardState[shard].state = PrepareReConfig
+				kv.DPrintf("shard %d state: %s", shard, PrepareReConfig)
 				args := PullShardLogArgs{
 					Shard:     shard,
 					PrevCfg:   *kv.shardState[shard].currentCfg,

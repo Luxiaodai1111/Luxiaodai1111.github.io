@@ -217,6 +217,7 @@ func (kv *KVServer) handleApply() {
 				reply := &CommonReply{
 					Err: OK,
 				}
+				var value string
 
 				if applyLog.CommandIndex <= kv.lastApplyIndex {
 					// 比如 raft 重启了，就要重新 apply
@@ -230,11 +231,11 @@ func (kv *KVServer) handleApply() {
 				// 防止重复应用同一条修改命令
 				if op.Op != OpGet && kv.isDuplicateRequest(op.ClientId, op.SequenceNum) {
 					kv.DPrintf("found duplicate request: %+v", op)
-					continue
+					goto replyCommand
 				}
 
 				// 更新状态机
-				value, ok := kv.db[op.Key]
+				value, ok = kv.db[op.Key]
 				if op.Op == OpGet {
 					if ok {
 						reply.Value = value
@@ -251,6 +252,7 @@ func (kv *KVServer) handleApply() {
 					kv.DPrintf("update <%s>:<%s>", op.Key, kv.db[op.Key])
 				}
 
+			replyCommand:
 				kv.Lock("replyCommand")
 				if op.Op != OpGet {
 					kv.updateDupReqHistory(op.ClientId, op.SequenceNum)
