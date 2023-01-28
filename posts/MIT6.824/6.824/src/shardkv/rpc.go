@@ -75,17 +75,7 @@ func (kv *ShardKV) PutAppend(args *CommandArgs, reply *CommonReply) {
 	kv.Command(args, reply)
 }
 
-func (kv *ShardKV) ReConfigLog(args *ReConfigLogArgs, reply *CommonReply) {
-	if kv.isDuplicateLog(ReConfigLog, int64(args.PrevCfg.Num), int64(args.UpdateCfg.Num)) {
-		kv.DPrintf("duplicate reConfig request: %+v, reply history response", args)
-		reply.Err = OK
-		return
-	}
-
-	index, term, isLeader := kv.rf.Start(Op{
-		LogType:         ReConfigLog,
-		ReConfigLogArgs: args,
-	})
+func (kv *ShardKV) replyCommon(index, term int, isLeader bool, reply *CommonReply) {
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
@@ -117,10 +107,25 @@ func (kv *ShardKV) ReConfigLog(args *ReConfigLogArgs, reply *CommonReply) {
 		reply.Err = ErrTimeout
 	}
 
-	kv.Lock("ReConfig")
-	defer kv.Unlock("ReConfig")
+	kv.Lock("cleanNotifyChan")
+	defer kv.Unlock("cleanNotifyChan")
 	close(kv.notifyChans[index])
 	delete(kv.notifyChans, index)
+}
+
+func (kv *ShardKV) ReConfigLog(args *ReConfigLogArgs, reply *CommonReply) {
+	if kv.isDuplicateLog(ReConfigLog, int64(args.PrevCfg.Num), int64(args.UpdateCfg.Num)) {
+		kv.DPrintf("duplicate reConfig request: %+v, reply history response", args)
+		reply.Err = OK
+		return
+	}
+
+	index, term, isLeader := kv.rf.Start(Op{
+		LogType:         ReConfigLog,
+		ReConfigLogArgs: args,
+	})
+
+	kv.replyCommon(index, term, isLeader, reply)
 }
 
 func (kv *ShardKV) PullShardLog(args *PullShardLogArgs, reply *CommonReply) {
@@ -134,41 +139,8 @@ func (kv *ShardKV) PullShardLog(args *PullShardLogArgs, reply *CommonReply) {
 		LogType:          PullShardLog,
 		PullShardLogArgs: args,
 	})
-	if !isLeader {
-		reply.Err = ErrWrongLeader
-		return
-	}
 
-	kv.Lock("getNotifyChan")
-	if _, ok := kv.notifyChans[index]; !ok {
-		kv.notifyChans[index] = make(chan *CommonReply)
-	}
-	kv.Unlock("getNotifyChan")
-
-	select {
-	case result := <-kv.notifyChans[index]:
-		currentTerm, isleader := kv.rf.GetState()
-		if !isleader || currentTerm != term {
-			reply.Err = ErrWrongLeader
-			kv.DPrintf("reply now is not leader")
-			return
-		}
-		kv.DPrintf("reply pull shard index: %d", index)
-
-		if reply.Err == ApplySnap {
-			reply.Err = ErrRetry
-		} else {
-			reply.Err, reply.Value = result.Err, result.Value
-		}
-	case <-time.After(ExecuteTimeout):
-		kv.DPrintf("wait pull shard apply log %d time out", index)
-		reply.Err = ErrTimeout
-	}
-
-	kv.Lock("PullShardLog")
-	defer kv.Unlock("PullShardLog")
-	close(kv.notifyChans[index])
-	delete(kv.notifyChans, index)
+	kv.replyCommon(index, term, isLeader, reply)
 }
 
 func (kv *ShardKV) UpdateShardLog(args *UpdateShardLogArgs, reply *CommonReply) {
@@ -182,41 +154,8 @@ func (kv *ShardKV) UpdateShardLog(args *UpdateShardLogArgs, reply *CommonReply) 
 		LogType:            UpdateShardLog,
 		UpdateShardLogArgs: args,
 	})
-	if !isLeader {
-		reply.Err = ErrWrongLeader
-		return
-	}
 
-	kv.Lock("getNotifyChan")
-	if _, ok := kv.notifyChans[index]; !ok {
-		kv.notifyChans[index] = make(chan *CommonReply)
-	}
-	kv.Unlock("getNotifyChan")
-
-	select {
-	case result := <-kv.notifyChans[index]:
-		currentTerm, isleader := kv.rf.GetState()
-		if !isleader || currentTerm != term {
-			reply.Err = ErrWrongLeader
-			kv.DPrintf("reply now is not leader")
-			return
-		}
-		kv.DPrintf("reply pull shard index: %d", index)
-
-		if reply.Err == ApplySnap {
-			reply.Err = ErrRetry
-		} else {
-			reply.Err, reply.Value = result.Err, result.Value
-		}
-	case <-time.After(ExecuteTimeout):
-		kv.DPrintf("wait pull shard apply log %d time out", index)
-		reply.Err = ErrTimeout
-	}
-
-	kv.Lock("UpdateShardLog")
-	defer kv.Unlock("UpdateShardLog")
-	close(kv.notifyChans[index])
-	delete(kv.notifyChans, index)
+	kv.replyCommon(index, term, isLeader, reply)
 }
 
 func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
@@ -231,11 +170,12 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 
 	kv.DPrintf("recv pullShard %d request: ", args.Shard)
 	actualShardCfgNum := kv.shardState[args.Shard].currentCfg.Num
-	if kv.shardState[args.Shard].state != Working {
+	if kv.shardState[args.Shard].state == ReConfining {
 		actualShardCfgNum = kv.shardState[args.Shard].prevCfg.Num
 	}
 	kv.DPrintf("now state: %s, %d, %d", kv.shardState[args.Shard].state, args.PrevCfg.Num, actualShardCfgNum)
-	if args.PrevCfg.Num == actualShardCfgNum {
+	if kv.shardState[args.Shard].state == ReConfining && args.PrevCfg.Num == actualShardCfgNum {
+		// 必须等到本服务器也开始迁移分片才能回复，否则数据库数据是不完全的
 		data := make(map[string]string)
 		for k, v := range kv.db {
 			if key2shard(k) == args.Shard {

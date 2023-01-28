@@ -106,35 +106,19 @@ func (kv *ShardKV) checkShard(key string, reply *CommonReply) bool {
 
 	shard := key2shard(key)
 	shardInfo := kv.shardState[shard]
-	if shardInfo.state == Working {
-		// 当前分片不由 gid 负责
-		if shardInfo.currentCfg.Shards[shard] != kv.gid {
-			reply.Err = ErrWrongGroup
-			kv.DPrintf("key %s shard %d response %s", key, shard, reply.Err)
-			return true
-		}
-	} else {
-		if shardInfo.state == ReConfining {
-			// 之前不负责，现在需要负责的分片，等待分片传输完成再服务
-			if shardInfo.prevCfg.Shards[shard] != kv.gid && shardInfo.currentCfg.Shards[shard] == kv.gid {
-				reply.Err = ErrRetry
-				kv.DPrintf("Waiting for key %s shard %d migration", key, shard)
-				return true
-			}
-			// 之前负责，现在不负责的分片，在开始 reconfig 后需要丢弃
-			if shardInfo.prevCfg.Shards[shard] == kv.gid && shardInfo.currentCfg.Shards[shard] != kv.gid {
-				reply.Err = ErrWrongGroup
-				kv.DPrintf("The key %s shard %d after ReConfining needs to be discard", key, shard)
-				return true
-			}
-		} else {
-			// 在 ReConfining 之前负责的分片需要处理
-			if shardInfo.prevCfg.Shards[shard] != kv.gid {
-				reply.Err = ErrWrongGroup
-				kv.DPrintf("The key %s shard %d before ReConfining needs to be process", key, shard)
-				return true
-			}
-		}
+	// 当前分片不由 gid 负责
+	if shardInfo.currentCfg.Shards[shard] != kv.gid {
+		reply.Err = ErrWrongGroup
+		kv.DPrintf("key %s (shard %d) response %s", key, shard, reply.Err)
+		return true
+	}
+
+	// 之前不负责，现在需要负责的分片，等待分片传输完成再服务
+	if shardInfo.state == ReConfining &&
+		shardInfo.prevCfg.Shards[shard] != kv.gid && shardInfo.currentCfg.Shards[shard] == kv.gid {
+		reply.Err = ErrRetry
+		kv.DPrintf("Waiting for key %s (shard %d) migration", key, shard)
+		return true
 	}
 
 	return false
@@ -142,13 +126,12 @@ func (kv *ShardKV) checkShard(key string, reply *CommonReply) bool {
 
 func (kv *ShardKV) pullShard(prevCfg shardctrler.Config, shard, prevGID int) {
 	kv.DPrintf("=== pullShard %d from %d ===", shard, prevGID)
+	args := PullShardArgs{
+		Shard:   shard,
+		PrevCfg: prevCfg,
+	}
+	gidServers := args.PrevCfg.Groups[prevGID]
 	for kv.killed() == false {
-		args := PullShardArgs{
-			Shard:   shard,
-			PrevCfg: prevCfg,
-		}
-		gidServers := args.PrevCfg.Groups[prevGID]
-
 		// try each server for the shard.
 		for si := 0; si < len(gidServers); si++ {
 			srv := kv.make_end(gidServers[si])
@@ -170,8 +153,7 @@ func (kv *ShardKV) pullShard(prevCfg shardctrler.Config, shard, prevGID int) {
 				}
 			}
 		}
-
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -183,25 +165,17 @@ func (kv *ShardKV) WriteLog(logType string, args interface{}) {
 		_, isleader := kv.rf.GetState()
 		if isleader {
 			var reply CommonReply
-			if logType == ReConfigLog {
-				reConfigLogArgs, ok := args.(ReConfigLogArgs)
-				if !ok {
-					goto logTypePanic
-				}
+			switch args.(type) {
+			case ReConfigLogArgs:
+				reConfigLogArgs, _ := args.(ReConfigLogArgs)
 				kv.ReConfigLog(&reConfigLogArgs, &reply)
-			} else if logType == PullShardLog {
-				pullShardLogArgs, ok := args.(PullShardLogArgs)
-				if !ok {
-					goto logTypePanic
-				}
+			case PullShardLogArgs:
+				pullShardLogArgs, _ := args.(PullShardLogArgs)
 				kv.PullShardLog(&pullShardLogArgs, &reply)
-			} else if logType == UpdateShardLog {
-				updateShardLogArgs, ok := args.(UpdateShardLogArgs)
-				if !ok {
-					goto logTypePanic
-				}
+			case UpdateShardLogArgs:
+				updateShardLogArgs, _ := args.(UpdateShardLogArgs)
 				kv.UpdateShardLog(&updateShardLogArgs, &reply)
-			} else {
+			default:
 				goto logTypePanic
 			}
 			if reply.Err == OK {
@@ -214,25 +188,17 @@ func (kv *ShardKV) WriteLog(logType string, args interface{}) {
 			retry:
 				var reply CommonReply
 				var ok bool
-				if logType == ReConfigLog {
-					reConfigLogArgs, ok := args.(ReConfigLogArgs)
-					if !ok {
-						goto logTypePanic
-					}
+				switch args.(type) {
+				case ReConfigLogArgs:
+					reConfigLogArgs, _ := args.(ReConfigLogArgs)
 					ok = srv.Call("ShardKV.ReConfigLog", &reConfigLogArgs, &reply)
-				} else if logType == PullShardLog {
-					pullShardLogArgs, ok := args.(PullShardLogArgs)
-					if !ok {
-						goto logTypePanic
-					}
+				case PullShardLogArgs:
+					pullShardLogArgs, _ := args.(PullShardLogArgs)
 					ok = srv.Call("ShardKV.PullShardLog", &pullShardLogArgs, &reply)
-				} else if logType == UpdateShardLog {
-					updateShardLogArgs, ok := args.(UpdateShardLogArgs)
-					if !ok {
-						goto logTypePanic
-					}
+				case UpdateShardLogArgs:
+					updateShardLogArgs, _ := args.(UpdateShardLogArgs)
 					ok = srv.Call("ShardKV.UpdateShardLog", &updateShardLogArgs, &reply)
-				} else {
+				default:
 					goto logTypePanic
 				}
 				if ok && (reply.Err == OK) {
@@ -240,16 +206,16 @@ func (kv *ShardKV) WriteLog(logType string, args interface{}) {
 					break
 				}
 				if ok && (reply.Err == ErrRetry) {
-					kv.DPrintf("retry write %s", logType)
+					kv.DPrintf("retry write %s %+v", logType, args)
 					goto retry
 				}
 			}
 		}
 		if !writeLogSuccess {
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 		}
 	}
-	kv.DPrintf("===== write %s success: %+v =====", logType, args)
+	//kv.DPrintf("===== write %s success: %+v =====", logType, args)
 	return
 
 logTypePanic:
@@ -289,8 +255,8 @@ func (kv *ShardKV) updateConfig() {
 			kv.Lock("updateConfig")
 			if args.UpdateCfg.Num == len(kv.configs) {
 				kv.configs = append(kv.configs, args.UpdateCfg)
+				kv.DPrintf("update configs: %+v", kv.configs)
 			}
-			kv.DPrintf("update configs: %+v", kv.configs)
 			kv.Unlock("updateConfig")
 		} else {
 			kv.RUnlock("checkConfigUpdate")
@@ -316,8 +282,6 @@ func (kv *ShardKV) updatePullShardLog() {
 					PrevCfg:   *kv.shardState[shard].currentCfg,
 					UpdateCfg: kv.configs[kv.shardState[shard].currentCfg.Num+1],
 				}
-				kv.shardState[shard].prevCfg = &args.PrevCfg
-				kv.shardState[shard].currentCfg = &args.UpdateCfg
 				go kv.WriteLog(PullShardLog, args)
 			}
 		}
