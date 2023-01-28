@@ -1,6 +1,8 @@
 package shardkv
 
-import "time"
+import (
+	"time"
+)
 
 func (kv *ShardKV) Command(args *CommandArgs, reply *CommonReply) {
 	if args.Op != OpGet && kv.isDuplicateLogWithLock(CommandLog, args.ClientId, args.SequenceNum) {
@@ -161,6 +163,21 @@ func (kv *ShardKV) UpdateShardLog(args *UpdateShardLogArgs, reply *CommonReply) 
 	kv.replyCommon(index, term, isLeader, reply)
 }
 
+func (kv *ShardKV) DeleteShardLog(args *DeleteShardArgs, reply *CommonReply) {
+	if kv.isDuplicateLogWithLock(DeleteShardLog, int64(args.Shard), int64(args.PrevCfg.Num)) {
+		kv.DPrintf("duplicate delete shard request: %+v, reply history response", args)
+		reply.Err = OK
+		return
+	}
+
+	index, term, isLeader := kv.rf.Start(Op{
+		LogType:         DeleteShardLog,
+		DeleteShardArgs: args,
+	})
+
+	kv.replyCommon(index, term, isLeader, reply)
+}
+
 func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 	_, isleader := kv.rf.GetState()
 	if !isleader {
@@ -188,10 +205,14 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 		}
 		reply.Err = OK
 		reply.Data = data
-		// 每个分片拉取或被拉取成功都表示这个分片可以开始服务了
+
 		kv.DPrintf("=== reply pullShard %d success, cfg num up to %d ===", args.Shard, kv.shardState[args.Shard].currentCfg.Num)
-		kv.shardState[args.Shard].state = Working
-		// TODO: 写入删除分片日志，同步 Working 状态
+		// 每个分片拉取或被拉取成功都表示这个分片可以开始服务了
+		// 写入删除分片日志，同步 Working 状态
+		go kv.WriteLog(DeleteShardLog, DeleteShardArgs{
+			Shard:   args.Shard,
+			PrevCfg: args.PrevCfg,
+		})
 	} else if args.PrevCfg.Num < actualShardCfgNum {
 		reply.Err = ErrDupPull
 	} else {

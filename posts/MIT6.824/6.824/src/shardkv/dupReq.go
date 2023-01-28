@@ -1,7 +1,5 @@
 package shardkv
 
-type DupHistorySnap map[int64]string
-
 func (kv *ShardKV) updateDupLog(logType string, k1, k2 int64) {
 	var dupMap map[int64]map[int64]struct{}
 	if logType == CommandLog {
@@ -12,6 +10,8 @@ func (kv *ShardKV) updateDupLog(logType string, k1, k2 int64) {
 		dupMap = kv.dupPullShard
 	} else if logType == UpdateShardLog {
 		dupMap = kv.dupUpdateShard
+	} else if logType == DeleteShardLog {
+		dupMap = kv.dupDeleteShard
 	}
 	if _, ok := dupMap[k1]; !ok {
 		dupMap[k1] = make(map[int64]struct{})
@@ -35,6 +35,8 @@ func (kv *ShardKV) isDuplicateLog(logType string, k1, k2 int64) bool {
 		dupMap = kv.dupPullShard
 	} else if logType == UpdateShardLog {
 		dupMap = kv.dupUpdateShard
+	} else if logType == DeleteShardLog {
+		dupMap = kv.dupDeleteShard
 	}
 	if _, ok := dupMap[k1]; ok {
 		if _, ok := dupMap[k1][k2]; ok {

@@ -64,6 +64,7 @@ type Op struct {
 	ReConfigLogArgs    *ReConfigLogArgs
 	PullShardLogArgs   *PullShardLogArgs
 	UpdateShardLogArgs *UpdateShardLogArgs
+	DeleteShardArgs    *DeleteShardArgs
 }
 
 type ShardState struct {
@@ -98,6 +99,7 @@ type ShardKV struct {
 	dupReconfig    map[int64]map[int64]struct{}
 	dupPullShard   map[int64]map[int64]struct{}
 	dupUpdateShard map[int64]map[int64]struct{}
+	dupDeleteShard map[int64]map[int64]struct{}
 }
 
 func (kv *ShardKV) checkShard(key string, reply *CommonReply) bool {
@@ -172,6 +174,9 @@ func (kv *ShardKV) WriteLog(logType string, args interface{}) {
 			case UpdateShardLogArgs:
 				updateShardLogArgs, _ := args.(UpdateShardLogArgs)
 				kv.UpdateShardLog(&updateShardLogArgs, &reply)
+			case DeleteShardArgs:
+				deleteShardArgs := args.(DeleteShardArgs)
+				kv.DeleteShardLog(&deleteShardArgs, &reply)
 			default:
 				goto logTypePanic
 			}
@@ -195,6 +200,9 @@ func (kv *ShardKV) WriteLog(logType string, args interface{}) {
 				case UpdateShardLogArgs:
 					updateShardLogArgs, _ := args.(UpdateShardLogArgs)
 					ok = srv.Call("ShardKV.UpdateShardLog", &updateShardLogArgs, &reply)
+				case DeleteShardArgs:
+					deleteShardArgs := args.(DeleteShardArgs)
+					ok = srv.Call("ShardKV.DeleteShardLog", &deleteShardArgs, &reply)
 				default:
 					goto logTypePanic
 				}
@@ -277,12 +285,12 @@ func (kv *ShardKV) updatePullShardLog() {
 		for shard, info := range kv.shardState {
 			if info.state == Working && kv.shardState[shard].currentCfg.Num+1 < len(kv.configs) {
 				kv.shardState[shard].state = PrepareReConfig
-				kv.DPrintf("shard %d state: %s", shard, PrepareReConfig)
 				args := PullShardLogArgs{
 					Shard:     shard,
 					PrevCfg:   *kv.shardState[shard].currentCfg,
 					UpdateCfg: kv.configs[kv.shardState[shard].currentCfg.Num+1],
 				}
+				kv.DPrintf("shard %d state: % %d->%d", shard, PrepareReConfig, args.PrevCfg.Num, args.UpdateCfg.Num)
 				go kv.WriteLog(PullShardLog, args)
 			}
 		}
@@ -361,6 +369,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.dupReconfig = make(map[int64]map[int64]struct{})
 	kv.dupPullShard = make(map[int64]map[int64]struct{})
 	kv.dupUpdateShard = make(map[int64]map[int64]struct{})
+	kv.dupDeleteShard = make(map[int64]map[int64]struct{})
 
 	go kv.updateConfig()       // 负责从 shardctrler 拉取配置，写入配置更新日志
 	go kv.updatePullShardLog() // 负责写入配置更改日志

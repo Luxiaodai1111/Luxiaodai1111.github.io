@@ -41,11 +41,14 @@ const (
 	ReConfigLog    = "ReConfigLog"
 	PullShardLog   = "PullShardLog"
 	UpdateShardLog = "UpdateShardLog"
+	DeleteShardLog = "DeleteShardLog"
 )
 
 type Err string
 
-type PullShardArgs = PullShardLogArgs
+type DeleteShardArgs CommonShardLogArgs
+type PullShardArgs CommonShardLogArgs
+type PullShardLogArgs CommonShardLogArgs
 
 type PullShardReply struct {
 	Err  Err
@@ -58,7 +61,7 @@ type UpdateShardLogArgs struct {
 	Data        map[string]string
 }
 
-type PullShardLogArgs struct {
+type CommonShardLogArgs struct {
 	Shard     int // 更改的分片
 	PrevCfg   shardctrler.Config
 	UpdateCfg shardctrler.Config

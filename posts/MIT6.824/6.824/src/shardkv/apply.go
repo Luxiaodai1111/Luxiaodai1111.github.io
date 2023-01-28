@@ -150,6 +150,37 @@ func (kv *ShardKV) applyUpdateShard(args *UpdateShardLogArgs, applyLogIndex int)
 	for k, v := range args.Data {
 		kv.db[k] = v
 	}
+	kv.DPrintf("update shard %d data success", args.Shard)
+
+replyCommand:
+	if _, ok := kv.notifyChans[applyLogIndex]; ok {
+		select {
+		case kv.notifyChans[applyLogIndex] <- reply:
+		default:
+			kv.DPrintf("reply to chan index %d failed", applyLogIndex)
+		}
+	}
+}
+
+func (kv *ShardKV) applyDeleteShard(args *DeleteShardArgs, applyLogIndex int) {
+	reply := &CommonReply{Err: OK}
+
+	kv.Lock("applyDeleteShard")
+	defer kv.Unlock("applyDeleteShard")
+	// 防止重复应用同一条修改命令
+	if kv.isDuplicateLog(DeleteShardLog, int64(args.Shard), int64(args.PrevCfg.Num)) {
+		kv.DPrintf("apply duplicate DeleteShardLog: %+v", args)
+		goto replyCommand
+	}
+
+	kv.updateDupLog(DeleteShardLog, int64(args.Shard), int64(args.PrevCfg.Num))
+	kv.shardState[args.Shard].state = Working
+	for k, _ := range kv.db {
+		if key2shard(k) == args.Shard {
+			delete(kv.db, k)
+		}
+	}
+	kv.DPrintf("delete shard %d success", args.Shard)
 
 replyCommand:
 	if _, ok := kv.notifyChans[applyLogIndex]; ok {
@@ -170,7 +201,7 @@ func (kv *ShardKV) makeSnap(applyLogIndex int) {
 	e := labgob.NewEncoder(w)
 	if e.Encode(kv.db) != nil || e.Encode(kv.configs) != nil || e.Encode(kv.shardState) != nil ||
 		e.Encode(kv.dupCommand) != nil || e.Encode(kv.dupReconfig) != nil ||
-		e.Encode(kv.dupPullShard) != nil || e.Encode(kv.dupUpdateShard) != nil {
+		e.Encode(kv.dupPullShard) != nil || e.Encode(kv.dupUpdateShard) != nil || e.Encode(kv.dupDeleteShard) != nil {
 		kv.DPrintf("[panic] encode snap error")
 		kv.Kill()
 		return
@@ -191,11 +222,12 @@ func (kv *ShardKV) restoreFromSnap(snapshot []byte, snapshotIndex int) {
 	kv.dupReconfig = make(map[int64]map[int64]struct{})
 	kv.dupPullShard = make(map[int64]map[int64]struct{})
 	kv.dupUpdateShard = make(map[int64]map[int64]struct{})
+	kv.dupDeleteShard = make(map[int64]map[int64]struct{})
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
 	if d.Decode(&kv.db) != nil || d.Decode(&kv.configs) != nil || d.Decode(&kv.shardState) != nil ||
 		d.Decode(&kv.dupCommand) != nil || d.Decode(&kv.dupReconfig) != nil ||
-		d.Decode(&kv.dupPullShard) != nil || d.Decode(&kv.dupUpdateShard) != nil {
+		d.Decode(&kv.dupPullShard) != nil || d.Decode(&kv.dupUpdateShard) != nil || d.Decode(&kv.dupDeleteShard) != nil {
 		kv.DPrintf("[panic] decode snap error")
 		kv.Kill()
 		return
@@ -255,6 +287,10 @@ func (kv *ShardKV) handleApply() {
 					kv.DPrintf("recieve update shard apply log: %d, UpdateShardLogArgs: %+v",
 						applyLog.CommandIndex, op.UpdateShardLogArgs)
 					kv.applyUpdateShard(op.UpdateShardLogArgs, applyLog.CommandIndex)
+				case DeleteShardLog:
+					kv.DPrintf("recieve delete shard apply log: %d, DeleteShardArgs: %+v",
+						applyLog.CommandIndex, op.DeleteShardArgs)
+					kv.applyDeleteShard(op.DeleteShardArgs, applyLog.CommandIndex)
 				default:
 					kv.DPrintf("[panic] unexpected LogType %+v", op)
 					kv.Kill()
