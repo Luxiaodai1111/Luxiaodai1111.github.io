@@ -189,13 +189,13 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 	defer kv.Unlock("PullShard")
 
 	kv.DPrintf("recv pullShard %d request: ", args.Shard)
-	actualShardCfgNum := kv.shardState[args.Shard].currentCfg.Num
-	if kv.shardState[args.Shard].state == ReConfining {
-		actualShardCfgNum = kv.shardState[args.Shard].prevCfg.Num
+	actualShardCfgNum := kv.shardState[args.Shard].CurrentCfg.Num
+	if kv.shardState[args.Shard].State == ReConfining {
+		actualShardCfgNum = kv.shardState[args.Shard].PrevCfg.Num
 	}
-	kv.DPrintf("now state: %s, %d, %d", kv.shardState[args.Shard].state, args.PrevCfg.Num, actualShardCfgNum)
+	kv.DPrintf("now state: %s, %d, %d", kv.shardState[args.Shard].State, args.PrevCfg.Num, actualShardCfgNum)
 	// TODO: 考虑快照会导致状态跳变
-	if kv.shardState[args.Shard].state == ReConfining && args.PrevCfg.Num == kv.shardState[args.Shard].prevCfg.Num {
+	if kv.shardState[args.Shard].State == ReConfining && args.PrevCfg.Num == actualShardCfgNum {
 		// 必须等到本服务器也开始迁移分片才能回复，否则数据库数据是不完全的
 		data := make(map[string]string)
 		for k, v := range kv.db {
@@ -206,7 +206,7 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 		reply.Err = OK
 		reply.Data = data
 
-		kv.DPrintf("=== reply pullShard %d success, cfg num up to %d ===", args.Shard, kv.shardState[args.Shard].currentCfg.Num)
+		kv.DPrintf("=== reply pullShard %d success, cfg num up to %d ===", args.Shard, kv.shardState[args.Shard].CurrentCfg.Num)
 		// 每个分片拉取或被拉取成功都表示这个分片可以开始服务了
 		// 写入删除分片日志，同步 Working 状态
 		go kv.WriteLog(DeleteShardLog, DeleteShardArgs{

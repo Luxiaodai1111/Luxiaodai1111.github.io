@@ -95,25 +95,25 @@ func (kv *ShardKV) applyPullShard(args *PullShardLogArgs, applyLogIndex int) {
 	}
 
 	kv.updateDupLog(PullShardLog, int64(args.Shard), int64(args.PrevCfg.Num))
-	kv.shardState[args.Shard].state = ReConfining
-	kv.shardState[args.Shard].prevCfg = &args.PrevCfg
-	kv.shardState[args.Shard].currentCfg = &args.UpdateCfg
+	kv.shardState[args.Shard].State = ReConfining
+	kv.shardState[args.Shard].PrevCfg = &args.PrevCfg
+	kv.shardState[args.Shard].CurrentCfg = &args.UpdateCfg
 	kv.DPrintf("update pull shard %d prevCfg:%+v, currentCfg: %+v", args.Shard,
-		kv.shardState[args.Shard].prevCfg, kv.shardState[args.Shard].currentCfg)
+		kv.shardState[args.Shard].PrevCfg, kv.shardState[args.Shard].CurrentCfg)
 
-	prevGID = kv.shardState[args.Shard].prevCfg.Shards[args.Shard]
-	nowGID = kv.shardState[args.Shard].currentCfg.Shards[args.Shard]
+	prevGID = kv.shardState[args.Shard].PrevCfg.Shards[args.Shard]
+	nowGID = kv.shardState[args.Shard].CurrentCfg.Shards[args.Shard]
 	if nowGID == kv.gid {
 		if prevGID == kv.gid || prevGID == 0 {
-			kv.DPrintf("shard %d' gid not change: cfg num up to %d", args.Shard, kv.shardState[args.Shard].currentCfg.Num)
-			kv.shardState[args.Shard].state = Working
+			kv.DPrintf("shard %d' gid not change: cfg num up to %d", args.Shard, kv.shardState[args.Shard].CurrentCfg.Num)
+			kv.shardState[args.Shard].State = Working
 		} else {
-			go kv.pullShard(*kv.shardState[args.Shard].prevCfg, args.Shard, prevGID)
+			go kv.pullShard(*kv.shardState[args.Shard].PrevCfg, args.Shard, prevGID)
 		}
 	} else {
 		if prevGID != kv.gid {
-			kv.DPrintf("shard %d' gid not change: cfg num up to %d", args.Shard, kv.shardState[args.Shard].currentCfg.Num)
-			kv.shardState[args.Shard].state = Working
+			kv.DPrintf("shard %d' gid not change: cfg num up to %d", args.Shard, kv.shardState[args.Shard].CurrentCfg.Num)
+			kv.shardState[args.Shard].State = Working
 		} else {
 			// 等待被拉取分片
 		}
@@ -146,7 +146,7 @@ func (kv *ShardKV) applyUpdateShard(args *UpdateShardLogArgs, applyLogIndex int)
 	}
 
 	kv.updateDupLog(UpdateShardLog, int64(args.Shard), int64(args.ShardCfgNum))
-	kv.shardState[args.Shard].state = Working
+	kv.shardState[args.Shard].State = Working
 	for k, v := range args.Data {
 		kv.db[k] = v
 	}
@@ -174,7 +174,7 @@ func (kv *ShardKV) applyDeleteShard(args *DeleteShardArgs, applyLogIndex int) {
 	}
 
 	kv.updateDupLog(DeleteShardLog, int64(args.Shard), int64(args.PrevCfg.Num))
-	kv.shardState[args.Shard].state = Working
+	kv.shardState[args.Shard].State = Working
 	for k, _ := range kv.db {
 		if key2shard(k) == args.Shard {
 			delete(kv.db, k)

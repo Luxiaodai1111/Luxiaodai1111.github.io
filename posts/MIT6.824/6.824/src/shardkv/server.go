@@ -68,9 +68,9 @@ type Op struct {
 }
 
 type ShardState struct {
-	state      string
-	prevCfg    *shardctrler.Config
-	currentCfg *shardctrler.Config
+	State      string
+	PrevCfg    *shardctrler.Config
+	CurrentCfg *shardctrler.Config
 }
 
 type ShardKV struct {
@@ -106,15 +106,15 @@ func (kv *ShardKV) checkShard(key string, reply *CommonReply) bool {
 	shard := key2shard(key)
 	shardInfo := kv.shardState[shard]
 	// 当前分片不由 gid 负责
-	if shardInfo.currentCfg.Shards[shard] != kv.gid {
+	if shardInfo.CurrentCfg.Shards[shard] != kv.gid {
 		reply.Err = ErrWrongGroup
 		kv.DPrintf("key %s (shard %d) response %s", key, shard, reply.Err)
 		return true
 	}
 
 	// 之前不负责，现在需要负责的分片，等待分片传输完成再服务
-	if shardInfo.state == ReConfining &&
-		shardInfo.prevCfg.Shards[shard] != kv.gid && shardInfo.currentCfg.Shards[shard] == kv.gid {
+	if shardInfo.State == ReConfining &&
+		shardInfo.PrevCfg.Shards[shard] != kv.gid && shardInfo.CurrentCfg.Shards[shard] == kv.gid {
 		reply.Err = ErrRetry
 		kv.DPrintf("Waiting for key %s (shard %d) migration", key, shard)
 		return true
@@ -123,35 +123,51 @@ func (kv *ShardKV) checkShard(key string, reply *CommonReply) bool {
 	return false
 }
 
-func (kv *ShardKV) pullShard(prevCfg shardctrler.Config, shard, prevGID int) {
-	kv.DPrintf("=== pullShard %d from %d ===", shard, prevGID)
+func (kv *ShardKV) pullShard(prevCfg shardctrler.Config, shard, dstGID int) {
+	kv.DPrintf("=== pullShard %d from %d ===", shard, dstGID)
 	args := PullShardArgs{
 		Shard:   shard,
 		PrevCfg: prevCfg,
 	}
-	gidServers := args.PrevCfg.Groups[prevGID]
+	gidServers := args.PrevCfg.Groups[dstGID]
 	for kv.killed() == false {
-		// try each server for the shard.
-		for si := 0; si < len(gidServers); si++ {
-			srv := kv.make_end(gidServers[si])
-			var reply PullShardReply
-			ok := srv.Call("ShardKV.PullShard", &args, &reply)
-			if ok {
-				if reply.Err == OK {
-					kv.DPrintf("=== pullShard %d from %d success, cfg num up to %d ===", shard, prevGID, kv.shardState[args.Shard].currentCfg.Num)
-					// 写入拉取成功日志
-					kv.WriteLog(UpdateShardLog, UpdateShardLogArgs{
-						Shard:       shard,
-						ShardCfgNum: prevCfg.Num,
-						Data:        reply.Data,
-					})
-					return
-				} else if reply.Err == ErrDupPull {
-					kv.DPrintf("=== dup pullShard %d from %d ===", shard, prevGID)
-					return
+		// 快照可能导致状态更新（比如其余成员已经拉取成功应用并快照同步），所以需要判断是否还要拉取分片数据
+		// 重复写入是没问题的，因为快照会把历史记录也同步
+		kv.RLock("checkpullShard")
+		prevGID := kv.shardState[shard].PrevCfg.Shards[shard]
+		prevNum := kv.shardState[shard].PrevCfg.Num
+		nowGID := kv.shardState[shard].CurrentCfg.Shards[shard]
+		state := kv.shardState[args.Shard].State
+		kv.RUnlock("checkpullShard")
+		if state == ReConfining && prevNum == args.PrevCfg.Num &&
+			nowGID == kv.gid && prevGID != kv.gid && prevGID != 0 {
+			// try each server for the shard.
+			for si := 0; si < len(gidServers); si++ {
+				srv := kv.make_end(gidServers[si])
+				var reply PullShardReply
+				ok := srv.Call("ShardKV.PullShard", &args, &reply)
+				if ok {
+					if reply.Err == OK {
+						kv.DPrintf("=== pullShard %d from %d success, cfg num up to %d ===", shard, dstGID, kv.shardState[args.Shard].CurrentCfg.Num)
+						// 写入拉取成功日志
+						kv.WriteLog(UpdateShardLog, UpdateShardLogArgs{
+							Shard:       shard,
+							ShardCfgNum: prevCfg.Num,
+							Data:        reply.Data,
+						})
+						return
+					} else if reply.Err == ErrDupPull {
+						kv.DPrintf("=== dup pullShard %d from %d ===", shard, dstGID)
+						return
+					}
 				}
 			}
+		} else {
+			kv.DPrintf("stop pull shard %d: [state] %s [prevNum] %d [args.PrevCfg.Num] %d [nowGID] %d [prevGID] %d",
+				shard, state, prevNum, args.PrevCfg.Num, nowGID, prevGID)
+			return
 		}
+
 		time.Sleep(100 * time.Millisecond)
 	}
 }
@@ -283,14 +299,14 @@ func (kv *ShardKV) updatePullShardLog() {
 
 		kv.Lock("updatePullShardLog")
 		for shard, info := range kv.shardState {
-			if info.state == Working && kv.shardState[shard].currentCfg.Num+1 < len(kv.configs) {
-				kv.shardState[shard].state = PrepareReConfig
+			if info.State == Working && kv.shardState[shard].CurrentCfg.Num+1 < len(kv.configs) {
+				kv.shardState[shard].State = PrepareReConfig
 				args := PullShardLogArgs{
 					Shard:     shard,
-					PrevCfg:   *kv.shardState[shard].currentCfg,
-					UpdateCfg: kv.configs[kv.shardState[shard].currentCfg.Num+1],
+					PrevCfg:   *kv.shardState[shard].CurrentCfg,
+					UpdateCfg: kv.configs[kv.shardState[shard].CurrentCfg.Num+1],
 				}
-				kv.DPrintf("shard %d state: % %d->%d", shard, PrepareReConfig, args.PrevCfg.Num, args.UpdateCfg.Num)
+				kv.DPrintf("shard %d state: %s %d->%d", shard, PrepareReConfig, args.PrevCfg.Num, args.UpdateCfg.Num)
 				go kv.WriteLog(PullShardLog, args)
 			}
 		}
@@ -334,6 +350,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	labgob.Register(ReConfigLogArgs{})
 	labgob.Register(PullShardLogArgs{})
 	labgob.Register(UpdateShardLogArgs{})
+	labgob.Register(&ShardState{})
+	labgob.Register(&shardctrler.Config{})
 
 	kv := new(ShardKV)
 	kv.me = me
@@ -355,9 +373,9 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.shardState = make(map[int]*ShardState, shardctrler.NShards)
 	for i := 0; i < shardctrler.NShards; i++ {
 		kv.shardState[i] = &ShardState{
-			state:      Working,
-			prevCfg:    &kv.configs[0],
-			currentCfg: &kv.configs[0],
+			State:      Working,
+			PrevCfg:    &kv.configs[0],
+			CurrentCfg: &kv.configs[0],
 		}
 	}
 	kv.updateConfigCh = make(chan struct{})
