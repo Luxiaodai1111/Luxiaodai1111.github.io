@@ -137,11 +137,14 @@ func (kv *ShardKV) ReConfigLog(args *ReConfigLogArgs, reply *CommonReply) {
 }
 
 func (kv *ShardKV) PullShardLog(args *PullShardLogArgs, reply *CommonReply) {
-	if kv.isDuplicateLogWithLock(PullShardLog, int64(args.Shard), int64(args.PrevCfg.Num)) {
+	kv.RLock("PullShardLog")
+	if kv.shardState[args.Shard].CurrentCfg.Num >= args.UpdateCfg.Num {
+		kv.RUnlock("PullShardLog")
 		kv.DPrintf("duplicate pull shard request: %+v, reply history response", args)
 		reply.Err = OK
 		return
 	}
+	kv.RUnlock("PullShardLog")
 
 	index, term, isLeader := kv.rf.Start(Op{
 		LogType:          PullShardLog,

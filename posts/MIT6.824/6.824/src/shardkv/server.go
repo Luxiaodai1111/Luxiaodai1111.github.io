@@ -96,7 +96,6 @@ type ShardKV struct {
 	db             map[string]string            // 内存数据库
 	notifyChans    map[int]chan *CommonReply    // 监听请求 apply
 	dupCommand     map[int64]map[int64]struct{} // 记录已经执行的修改命令，防止重复执行
-	dupPullShard   map[int64]map[int64]struct{}
 	dupUpdateShard map[int64]map[int64]struct{}
 	dupDeleteShard map[int64]map[int64]struct{}
 }
@@ -382,7 +381,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.db = make(map[string]string)
 	kv.notifyChans = make(map[int]chan *CommonReply)
 	kv.dupCommand = make(map[int64]map[int64]struct{})
-	kv.dupPullShard = make(map[int64]map[int64]struct{})
 	kv.dupUpdateShard = make(map[int64]map[int64]struct{})
 	kv.dupDeleteShard = make(map[int64]map[int64]struct{})
 

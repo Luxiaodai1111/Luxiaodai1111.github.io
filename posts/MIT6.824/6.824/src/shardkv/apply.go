@@ -86,12 +86,16 @@ func (kv *ShardKV) applyPullShard(args *PullShardLogArgs, applyLogIndex int) {
 	kv.Lock("applyPullShard")
 	defer kv.Unlock("applyPullShard")
 	// 防止重复应用同一条修改命令
-	if kv.isDuplicateLog(PullShardLog, int64(args.Shard), int64(args.PrevCfg.Num)) {
+	if kv.shardState[args.Shard].CurrentCfg.Num >= args.UpdateCfg.Num {
 		kv.DPrintf("apply duplicate PullShardLog: %+v", args)
 		goto replyCommand
+	} else {
+		if kv.shardState[args.Shard].CurrentCfg.Num+1 != args.UpdateCfg.Num {
+			panic(fmt.Sprintf("shard %d CurrentCfg.Num %d, args.UpdateCfg.Num %d",
+				args.Shard, kv.shardState[args.Shard].CurrentCfg.Num, args.UpdateCfg.Num))
+		}
 	}
 
-	kv.updateDupLog(PullShardLog, int64(args.Shard), int64(args.PrevCfg.Num))
 	kv.shardState[args.Shard].State = ReConfining
 	kv.shardState[args.Shard].PrevCfg = &args.PrevCfg
 	kv.shardState[args.Shard].CurrentCfg = &args.UpdateCfg
@@ -196,8 +200,7 @@ func (kv *ShardKV) makeSnap(applyLogIndex int) {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	if e.Encode(kv.db) != nil || e.Encode(kv.configs) != nil || e.Encode(kv.shardState) != nil ||
-		e.Encode(dupCommandHistorySnap) != nil || e.Encode(kv.dupPullShard) != nil ||
-		e.Encode(kv.dupUpdateShard) != nil || e.Encode(kv.dupDeleteShard) != nil {
+		e.Encode(dupCommandHistorySnap) != nil || e.Encode(kv.dupUpdateShard) != nil || e.Encode(kv.dupDeleteShard) != nil {
 		panic(fmt.Sprintf("[panic] encode snap error"))
 	}
 	data := w.Bytes()
@@ -220,8 +223,7 @@ func (kv *ShardKV) restoreFromSnap(snapshot []byte, snapshotIndex int) {
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
 	if d.Decode(&kv.db) != nil || d.Decode(&kv.configs) != nil || d.Decode(&kv.shardState) != nil ||
-		d.Decode(&dupCommandHistorySnap) != nil || d.Decode(&kv.dupPullShard) != nil ||
-		d.Decode(&kv.dupUpdateShard) != nil || d.Decode(&kv.dupDeleteShard) != nil {
+		d.Decode(&dupCommandHistorySnap) != nil || d.Decode(&kv.dupUpdateShard) != nil || d.Decode(&kv.dupDeleteShard) != nil {
 		panic(fmt.Sprintf("[panic] decode snap error"))
 	}
 	kv.dupCommand = kv.restoreDupHistorySnap(dupCommandHistorySnap)
