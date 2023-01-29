@@ -197,10 +197,11 @@ func (kv *ShardKV) makeSnap(applyLogIndex int) {
 
 	kv.Lock("makeSnap")
 	defer kv.Unlock("makeSnap")
+	dupCommandHistorySnap := kv.makeDupHistorySnap(kv.dupCommand)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	if e.Encode(kv.db) != nil || e.Encode(kv.configs) != nil || e.Encode(kv.shardState) != nil ||
-		e.Encode(kv.dupCommand) != nil || e.Encode(kv.dupReconfig) != nil ||
+		e.Encode(dupCommandHistorySnap) != nil || e.Encode(kv.dupReconfig) != nil ||
 		e.Encode(kv.dupPullShard) != nil || e.Encode(kv.dupUpdateShard) != nil || e.Encode(kv.dupDeleteShard) != nil {
 		kv.DPrintf("[panic] encode snap error")
 		kv.Kill()
@@ -218,6 +219,7 @@ func (kv *ShardKV) restoreFromSnap(snapshot []byte, snapshotIndex int) {
 	kv.db = make(map[string]string)
 	kv.configs = make([]shardctrler.Config, 1)
 	kv.shardState = make(map[int]*ShardState, shardctrler.NShards)
+	var dupCommandHistorySnap DupHistorySnap
 	kv.dupCommand = make(map[int64]map[int64]struct{})
 	kv.dupReconfig = make(map[int64]map[int64]struct{})
 	kv.dupPullShard = make(map[int64]map[int64]struct{})
@@ -226,12 +228,13 @@ func (kv *ShardKV) restoreFromSnap(snapshot []byte, snapshotIndex int) {
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
 	if d.Decode(&kv.db) != nil || d.Decode(&kv.configs) != nil || d.Decode(&kv.shardState) != nil ||
-		d.Decode(&kv.dupCommand) != nil || d.Decode(&kv.dupReconfig) != nil ||
+		d.Decode(&dupCommandHistorySnap) != nil || d.Decode(&kv.dupReconfig) != nil ||
 		d.Decode(&kv.dupPullShard) != nil || d.Decode(&kv.dupUpdateShard) != nil || d.Decode(&kv.dupDeleteShard) != nil {
 		kv.DPrintf("[panic] decode snap error")
 		kv.Kill()
 		return
 	}
+	kv.dupCommand = kv.restoreDupHistorySnap(dupCommandHistorySnap)
 
 	// lastApplyIndex 到快照之间的修改请求一定会包含在查重哈希表里
 	// 对于读只需要让客户端重新尝试即可
