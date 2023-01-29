@@ -209,9 +209,7 @@ func (kv *KVServer) handleApply() {
 			if applyLog.CommandValid {
 				op, ok := applyLog.Command.(Op)
 				if !ok {
-					kv.DPrintf("[panic] recieved apply log's command error")
-					kv.Kill()
-					return
+					panic(fmt.Sprintf("[panic] recieved apply log's command error"))
 				}
 
 				reply := &CommonReply{
@@ -279,10 +277,8 @@ func (kv *KVServer) handleApply() {
 					kv.Lock("snap")
 					dupReqHistorySnap := kv.makeDupReqHistorySnap()
 					if e.Encode(kv.db) != nil || e.Encode(dupReqHistorySnap) != nil {
-						kv.DPrintf("[panic] encode snap error")
 						kv.Unlock("snap")
-						kv.Kill()
-						return
+						panic(fmt.Sprintf("[panic] encode snap error"))
 					}
 					kv.Unlock("snap")
 					data := w.Bytes()
@@ -303,10 +299,8 @@ func (kv *KVServer) handleApply() {
 				kv.db = make(map[string]string)
 				var dupReqHistorySnap DupReqHistorySnap
 				if d.Decode(&kv.db) != nil || d.Decode(&dupReqHistorySnap) != nil {
-					kv.DPrintf("[panic] decode snap error")
 					kv.Unlock("applySnap")
-					kv.Kill()
-					return
+					panic(fmt.Sprintf("[panic] decode snap error"))
 				}
 				kv.restoreDupReqHistorySnap(dupReqHistorySnap)
 				kv.Unlock("applySnap")
@@ -328,9 +322,7 @@ func (kv *KVServer) handleApply() {
 				kv.Unlock("replyCommand")
 				kv.lastApplyIndex = applyLog.SnapshotIndex
 			} else {
-				kv.DPrintf(fmt.Sprintf("[panic] unexpected applyLog %v", applyLog))
-				kv.Kill()
-				return
+				panic(fmt.Sprintf("[panic] unexpected applyLog %+v", applyLog))
 			}
 		default:
 			continue

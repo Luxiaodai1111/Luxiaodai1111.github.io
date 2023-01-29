@@ -252,9 +252,7 @@ func (sc *ShardCtrler) handleApply() {
 			if applyLog.CommandValid {
 				op, ok := applyLog.Command.(Op)
 				if !ok {
-					sc.DPrintf("[panic] recieved apply log's command error")
-					sc.Kill()
-					return
+					panic(fmt.Sprintf("[panic] recieved apply log's command error"))
 				}
 
 				reply := &CommonReply{
@@ -352,9 +350,7 @@ func (sc *ShardCtrler) handleApply() {
 				}
 				sc.Unlock("replyCommand")
 			} else {
-				sc.DPrintf(fmt.Sprintf("[panic] unexpected applyLog %v", applyLog))
-				sc.Kill()
-				return
+				panic(fmt.Sprintf("[panic] unexpected applyLog %+v", applyLog))
 			}
 		default:
 			continue

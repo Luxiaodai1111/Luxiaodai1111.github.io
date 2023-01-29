@@ -96,7 +96,6 @@ type ShardKV struct {
 	db             map[string]string            // 内存数据库
 	notifyChans    map[int]chan *CommonReply    // 监听请求 apply
 	dupCommand     map[int64]map[int64]struct{} // 记录已经执行的修改命令，防止重复执行
-	dupReconfig    map[int64]map[int64]struct{}
 	dupPullShard   map[int64]map[int64]struct{}
 	dupUpdateShard map[int64]map[int64]struct{}
 	dupDeleteShard map[int64]map[int64]struct{}
@@ -148,7 +147,7 @@ func (kv *ShardKV) pullShard(prevCfg shardctrler.Config, shard, dstGID int) {
 				ok := srv.Call("ShardKV.PullShard", &args, &reply)
 				if ok {
 					if reply.Err == OK {
-						kv.DPrintf("=== pullShard %d from %d success, cfg num up to %d ===", shard, dstGID, kv.shardState[args.Shard].CurrentCfg.Num)
+						kv.DPrintf("=== pullShard %d from %d success, cfg num up to %d ===", shard, dstGID, kv.shardState[shard].CurrentCfg.Num)
 						// 写入拉取成功日志
 						kv.WriteLog(UpdateShardLog, UpdateShardLogArgs{
 							Shard:       shard,
@@ -240,9 +239,7 @@ func (kv *ShardKV) WriteLog(logType string, args interface{}) {
 	return
 
 logTypePanic:
-	kv.DPrintf("[panic] error %s args %+v", logType, args)
-	kv.Kill()
-	return
+	panic(fmt.Sprintf("[panic] error %s args %+v", logType, args))
 }
 
 func (kv *ShardKV) updateConfig() {
@@ -271,6 +268,7 @@ func (kv *ShardKV) updateConfig() {
 			}
 			kv.RUnlock("checkConfigUpdate")
 
+			// WriteLog 只有 applyReConfig 成功才会返回
 			kv.WriteLog(ReConfigLog, args)
 
 			kv.Lock("updateConfig")
@@ -384,7 +382,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.db = make(map[string]string)
 	kv.notifyChans = make(map[int]chan *CommonReply)
 	kv.dupCommand = make(map[int64]map[int64]struct{})
-	kv.dupReconfig = make(map[int64]map[int64]struct{})
 	kv.dupPullShard = make(map[int64]map[int64]struct{})
 	kv.dupUpdateShard = make(map[int64]map[int64]struct{})
 	kv.dupDeleteShard = make(map[int64]map[int64]struct{})

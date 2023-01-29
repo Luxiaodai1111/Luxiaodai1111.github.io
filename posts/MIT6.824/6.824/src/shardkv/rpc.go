@@ -119,11 +119,14 @@ func (kv *ShardKV) replyCommon(index, term int, isLeader bool, reply *CommonRepl
 }
 
 func (kv *ShardKV) ReConfigLog(args *ReConfigLogArgs, reply *CommonReply) {
-	if kv.isDuplicateLogWithLock(ReConfigLog, int64(args.PrevCfg.Num), int64(args.UpdateCfg.Num)) {
+	kv.RLock("ReConfigLog")
+	if args.UpdateCfg.Num < len(kv.configs) {
+		kv.RUnlock("ReConfigLog")
 		kv.DPrintf("duplicate reConfig request: %+v, reply history response", args)
 		reply.Err = OK
 		return
 	}
+	kv.RUnlock("ReConfigLog")
 
 	index, term, isLeader := kv.rf.Start(Op{
 		LogType:         ReConfigLog,
