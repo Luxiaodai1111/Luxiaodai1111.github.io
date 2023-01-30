@@ -167,7 +167,7 @@ func (kv *ShardKV) applyDeleteShard(args *DeleteShardArgs, applyLogIndex int) {
 	defer kv.Unlock("applyDeleteShard")
 
 	// 防止重复应用同一条修改命令
-	if kv.shardState[args.Shard].State == ReConfining && kv.shardState[args.Shard].PrevCfg.Num == args.PrevCfg.Num {
+	if kv.shardState[args.Shard].State == ReConfining && kv.shardState[args.Shard].PrevCfg.Num == args.ShardCfgNum {
 		kv.shardState[args.Shard].State = Working
 		for k, _ := range kv.db {
 			if key2shard(k) == args.Shard {

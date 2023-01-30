@@ -219,7 +219,7 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 	// 每个分片拉取或被拉取成功都表示这个分片可以开始服务了
 	// 写入删除分片日志，同步 Working 状态
 	go kv.WriteLog(DeleteShardLog, DeleteShardArgs{
-		Shard:   args.Shard,
-		PrevCfg: args.PrevCfg,
+		Shard:       args.Shard,
+		ShardCfgNum: args.PrevCfg.Num,
 	})
 }
