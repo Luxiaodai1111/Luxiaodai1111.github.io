@@ -91,7 +91,7 @@ func (kv *ShardKV) applyPullShard(args *PullShardLogArgs, applyLogIndex int) {
 		goto replyCommand
 	} else {
 		if kv.shardState[args.Shard].CurrentCfg.Num+1 != args.UpdateCfg.Num {
-			panic(fmt.Sprintf("shard %d CurrentCfg.Num %d, args.UpdateCfg.Num %d",
+			panic(fmt.Sprintf("applyPullShard shard %d CurrentCfg.Num %d, args.UpdateCfg.Num %d",
 				args.Shard, kv.shardState[args.Shard].CurrentCfg.Num, args.UpdateCfg.Num))
 		}
 	}
@@ -138,20 +138,19 @@ func (kv *ShardKV) applyUpdateShard(args *UpdateShardLogArgs, applyLogIndex int)
 
 	kv.Lock("applyUpdateShard")
 	defer kv.Unlock("applyUpdateShard")
-	// 防止重复应用同一条修改命令
-	if kv.isDuplicateLog(UpdateShardLog, int64(args.Shard), int64(args.ShardCfgNum)) {
+	prevGID := kv.shardState[args.Shard].PrevCfg.Shards[args.Shard]
+	nowGID := kv.shardState[args.Shard].CurrentCfg.Shards[args.Shard]
+	if kv.shardState[args.Shard].State == ReConfining && kv.shardState[args.Shard].PrevCfg.Num == args.ShardCfgNum &&
+		nowGID == kv.gid && prevGID != kv.gid && prevGID != 0 {
+		kv.shardState[args.Shard].State = Working
+		for k, v := range args.Data {
+			kv.db[k] = v
+		}
+		kv.DPrintf("update shard %d (cfg %d) data success", args.Shard, args.ShardCfgNum)
+	} else {
 		kv.DPrintf("apply duplicate UpdateShardLog: %+v", args)
-		goto replyCommand
 	}
 
-	kv.updateDupLog(UpdateShardLog, int64(args.Shard), int64(args.ShardCfgNum))
-	kv.shardState[args.Shard].State = Working
-	for k, v := range args.Data {
-		kv.db[k] = v
-	}
-	kv.DPrintf("update shard %d data success", args.Shard)
-
-replyCommand:
 	if _, ok := kv.notifyChans[applyLogIndex]; ok {
 		select {
 		case kv.notifyChans[applyLogIndex] <- reply:
@@ -166,22 +165,20 @@ func (kv *ShardKV) applyDeleteShard(args *DeleteShardArgs, applyLogIndex int) {
 
 	kv.Lock("applyDeleteShard")
 	defer kv.Unlock("applyDeleteShard")
+
 	// 防止重复应用同一条修改命令
-	if kv.isDuplicateLog(DeleteShardLog, int64(args.Shard), int64(args.PrevCfg.Num)) {
-		kv.DPrintf("apply duplicate DeleteShardLog: %+v", args)
-		goto replyCommand
-	}
-
-	kv.updateDupLog(DeleteShardLog, int64(args.Shard), int64(args.PrevCfg.Num))
-	kv.shardState[args.Shard].State = Working
-	for k, _ := range kv.db {
-		if key2shard(k) == args.Shard {
-			delete(kv.db, k)
+	if kv.shardState[args.Shard].State == ReConfining && kv.shardState[args.Shard].PrevCfg.Num == args.PrevCfg.Num {
+		kv.shardState[args.Shard].State = Working
+		for k, _ := range kv.db {
+			if key2shard(k) == args.Shard {
+				delete(kv.db, k)
+			}
 		}
+		kv.DPrintf("delete shard %d success", args.Shard)
+	} else {
+		kv.DPrintf("apply duplicate DeleteShardLog: %+v", args)
 	}
-	kv.DPrintf("delete shard %d success", args.Shard)
 
-replyCommand:
 	if _, ok := kv.notifyChans[applyLogIndex]; ok {
 		select {
 		case kv.notifyChans[applyLogIndex] <- reply:
@@ -199,8 +196,7 @@ func (kv *ShardKV) makeSnap(applyLogIndex int) {
 	dupCommandHistorySnap := kv.makeDupHistorySnap(kv.dupCommand)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	if e.Encode(kv.db) != nil || e.Encode(kv.configs) != nil || e.Encode(kv.shardState) != nil ||
-		e.Encode(dupCommandHistorySnap) != nil || e.Encode(kv.dupUpdateShard) != nil || e.Encode(kv.dupDeleteShard) != nil {
+	if e.Encode(kv.db) != nil || e.Encode(kv.configs) != nil || e.Encode(kv.shardState) != nil || e.Encode(dupCommandHistorySnap) != nil {
 		panic(fmt.Sprintf("[panic] encode snap error"))
 	}
 	data := w.Bytes()
@@ -212,18 +208,10 @@ func (kv *ShardKV) restoreFromSnap(snapshot []byte, snapshotIndex int) {
 	kv.Lock("restoreFromSnap")
 	defer kv.Unlock("restoreFromSnap")
 
-	//kv.db = make(map[string]string)
-	//kv.configs = make([]shardctrler.Config, 1)
-	//kv.shardState = make(map[int]*ShardState, shardctrler.NShards)
 	var dupCommandHistorySnap DupHistorySnap
-	//kv.dupCommand = make(map[int64]map[int64]struct{})
-	//kv.dupPullShard = make(map[int64]map[int64]struct{})
-	//kv.dupUpdateShard = make(map[int64]map[int64]struct{})
-	//kv.dupDeleteShard = make(map[int64]map[int64]struct{})
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
-	if d.Decode(&kv.db) != nil || d.Decode(&kv.configs) != nil || d.Decode(&kv.shardState) != nil ||
-		d.Decode(&dupCommandHistorySnap) != nil || d.Decode(&kv.dupUpdateShard) != nil || d.Decode(&kv.dupDeleteShard) != nil {
+	if d.Decode(&kv.db) != nil || d.Decode(&kv.configs) != nil || d.Decode(&kv.shardState) != nil || d.Decode(&dupCommandHistorySnap) != nil {
 		panic(fmt.Sprintf("[panic] decode snap error"))
 	}
 	kv.dupCommand = kv.restoreDupHistorySnap(dupCommandHistorySnap)

@@ -21,7 +21,6 @@ const (
 	ErrWrongLeader = "ErrWrongLeader"
 	ErrTimeout     = "ErrTimeout"
 	ErrRetry       = "ErrRetry"
-	ErrDupPull     = "ErrDupPull"
 
 	ApplySnap = "ApplySnap"
 

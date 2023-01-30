@@ -96,8 +96,6 @@ type ShardKV struct {
 	db             map[string]string            // 内存数据库
 	notifyChans    map[int]chan *CommonReply    // 监听请求 apply
 	dupCommand     map[int64]map[int64]struct{} // 记录已经执行的修改命令，防止重复执行
-	dupUpdateShard map[int64]map[int64]struct{}
-	dupDeleteShard map[int64]map[int64]struct{}
 }
 
 func (kv *ShardKV) checkShard(key string, reply *CommonReply) bool {
@@ -130,7 +128,6 @@ func (kv *ShardKV) pullShard(prevCfg shardctrler.Config, shard, dstGID int) {
 	gidServers := args.PrevCfg.Groups[dstGID]
 	for kv.killed() == false {
 		// 快照可能导致状态更新（比如其余成员已经拉取成功应用并快照同步），所以需要判断是否还要拉取分片数据
-		// 重复写入是没问题的，因为快照会把历史记录也同步
 		kv.RLock("checkpullShard")
 		prevGID := kv.shardState[shard].PrevCfg.Shards[shard]
 		prevNum := kv.shardState[shard].PrevCfg.Num
@@ -153,9 +150,6 @@ func (kv *ShardKV) pullShard(prevCfg shardctrler.Config, shard, dstGID int) {
 							ShardCfgNum: prevCfg.Num,
 							Data:        reply.Data,
 						})
-						return
-					} else if reply.Err == ErrDupPull {
-						kv.DPrintf("=== dup pullShard %d from %d ===", shard, dstGID)
 						return
 					}
 				}
@@ -270,12 +264,12 @@ func (kv *ShardKV) updateConfig() {
 			// WriteLog 只有 applyReConfig 成功才会返回
 			kv.WriteLog(ReConfigLog, args)
 
-			kv.Lock("updateConfig")
-			if args.UpdateCfg.Num == len(kv.configs) {
-				kv.configs = append(kv.configs, args.UpdateCfg)
-				kv.DPrintf("update configs: %+v", kv.configs)
-			}
-			kv.Unlock("updateConfig")
+			//kv.Lock("updateConfig")
+			//if args.UpdateCfg.Num == len(kv.configs) {
+			//	kv.configs = append(kv.configs, args.UpdateCfg)
+			//	kv.DPrintf("update configs: %+v", kv.configs)
+			//}
+			//kv.Unlock("updateConfig")
 		} else {
 			kv.RUnlock("checkConfigUpdate")
 		}
@@ -381,8 +375,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.db = make(map[string]string)
 	kv.notifyChans = make(map[int]chan *CommonReply)
 	kv.dupCommand = make(map[int64]map[int64]struct{})
-	kv.dupUpdateShard = make(map[int64]map[int64]struct{})
-	kv.dupDeleteShard = make(map[int64]map[int64]struct{})
 
 	go kv.updateConfig()       // 负责从 shardctrler 拉取配置，写入配置更新日志
 	go kv.updatePullShardLog() // 负责写入配置更改日志

@@ -155,11 +155,7 @@ func (kv *ShardKV) PullShardLog(args *PullShardLogArgs, reply *CommonReply) {
 }
 
 func (kv *ShardKV) UpdateShardLog(args *UpdateShardLogArgs, reply *CommonReply) {
-	if kv.isDuplicateLogWithLock(UpdateShardLog, int64(args.Shard), int64(args.ShardCfgNum)) {
-		kv.DPrintf("duplicate update shard request: %+v, reply history response", args)
-		reply.Err = OK
-		return
-	}
+	// 在调用更外层（pullShard）去重
 
 	index, term, isLeader := kv.rf.Start(Op{
 		LogType:            UpdateShardLog,
@@ -170,11 +166,7 @@ func (kv *ShardKV) UpdateShardLog(args *UpdateShardLogArgs, reply *CommonReply) 
 }
 
 func (kv *ShardKV) DeleteShardLog(args *DeleteShardArgs, reply *CommonReply) {
-	if kv.isDuplicateLogWithLock(DeleteShardLog, int64(args.Shard), int64(args.PrevCfg.Num)) {
-		kv.DPrintf("duplicate delete shard request: %+v, reply history response", args)
-		reply.Err = OK
-		return
-	}
+	// 去重同 UpdateShardLog
 
 	index, term, isLeader := kv.rf.Start(Op{
 		LogType:         DeleteShardLog,
@@ -200,28 +192,34 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 		actualShardCfgNum = kv.shardState[args.Shard].PrevCfg.Num
 	}
 	kv.DPrintf("now state: %s, %d, %d", kv.shardState[args.Shard].State, args.PrevCfg.Num, actualShardCfgNum)
-	// TODO: 考虑快照会导致状态跳变
-	if kv.shardState[args.Shard].State == ReConfining && args.PrevCfg.Num == actualShardCfgNum {
+	if args.PrevCfg.Num == actualShardCfgNum {
 		// 必须等到本服务器也开始迁移分片才能回复，否则数据库数据是不完全的
-		data := make(map[string]string)
-		for k, v := range kv.db {
-			if key2shard(k) == args.Shard {
-				data[k] = v
-			}
+		if kv.shardState[args.Shard].State != ReConfining {
+			reply.Err = ErrRetry
+			return
 		}
-		reply.Err = OK
-		reply.Data = data
-
-		kv.DPrintf("=== reply pullShard %d success, cfg num up to %d ===", args.Shard, kv.shardState[args.Shard].CurrentCfg.Num)
-		// 每个分片拉取或被拉取成功都表示这个分片可以开始服务了
-		// 写入删除分片日志，同步 Working 状态
-		go kv.WriteLog(DeleteShardLog, DeleteShardArgs{
-			Shard:   args.Shard,
-			PrevCfg: args.PrevCfg,
-		})
 	} else if args.PrevCfg.Num < actualShardCfgNum {
-		reply.Err = ErrDupPull
+		// 考虑快照会导致状态跳变，当分片配置大于参数配置时，表示一定曾经拉取成功了
+		// 但是回复不一定可以成功到达，所以这里也需要回复完整的数据，这里分片的数据不会变得比参数更新，因为如果要变化，需要依赖拉取服务器先更新成功
 	} else {
 		reply.Err = ErrRetry
+		return
 	}
+
+	data := make(map[string]string)
+	for k, v := range kv.db {
+		if key2shard(k) == args.Shard {
+			data[k] = v
+		}
+	}
+	reply.Err = OK
+	reply.Data = data
+
+	kv.DPrintf("=== reply pullShard %d success, cfg num up to %d ===", args.Shard, kv.shardState[args.Shard].CurrentCfg.Num)
+	// 每个分片拉取或被拉取成功都表示这个分片可以开始服务了
+	// 写入删除分片日志，同步 Working 状态
+	go kv.WriteLog(DeleteShardLog, DeleteShardArgs{
+		Shard:   args.Shard,
+		PrevCfg: args.PrevCfg,
+	})
 }
