@@ -1,8 +1,6 @@
 package shardkv
 
 import (
-	"6.824/labgob"
-	"bytes"
 	"fmt"
 )
 
@@ -186,51 +184,6 @@ func (kv *ShardKV) applyDeleteShard(args *DeleteShardArgs, applyLogIndex int) {
 			kv.DPrintf("reply to chan index %d failed", applyLogIndex)
 		}
 	}
-}
-
-func (kv *ShardKV) makeSnap(applyLogIndex int) {
-	kv.DPrintf("======== snapshot %d ========", applyLogIndex)
-
-	kv.Lock("makeSnap")
-	defer kv.Unlock("makeSnap")
-	dupCommandHistorySnap := kv.makeDupHistorySnap(kv.dupCommand)
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	if e.Encode(kv.db) != nil || e.Encode(kv.configs) != nil || e.Encode(kv.shardState) != nil || e.Encode(dupCommandHistorySnap) != nil {
-		panic(fmt.Sprintf("[panic] encode snap error"))
-	}
-	data := w.Bytes()
-	kv.DPrintf("snap size: %d", len(data))
-	kv.rf.Snapshot(applyLogIndex, data)
-}
-
-func (kv *ShardKV) restoreFromSnap(snapshot []byte, snapshotIndex int) {
-	kv.Lock("restoreFromSnap")
-	defer kv.Unlock("restoreFromSnap")
-
-	var dupCommandHistorySnap DupHistorySnap
-	r := bytes.NewBuffer(snapshot)
-	d := labgob.NewDecoder(r)
-	if d.Decode(&kv.db) != nil || d.Decode(&kv.configs) != nil || d.Decode(&kv.shardState) != nil || d.Decode(&dupCommandHistorySnap) != nil {
-		panic(fmt.Sprintf("[panic] decode snap error"))
-	}
-	kv.dupCommand = kv.restoreDupHistorySnap(dupCommandHistorySnap)
-
-	// lastApplyIndex 到快照之间的修改请求一定会包含在查重哈希表里
-	// 对于读只需要让客户端重新尝试即可
-	reply := &CommonReply{
-		Err: ApplySnap,
-	}
-	for idx := kv.lastApplyIndex + 1; idx <= snapshotIndex; idx++ {
-		if _, ok := kv.notifyChans[idx]; ok {
-			select {
-			case kv.notifyChans[idx] <- reply:
-			default:
-			}
-		}
-	}
-	kv.lastApplyIndex = snapshotIndex
-	return
 }
 
 func (kv *ShardKV) handleApply() {
