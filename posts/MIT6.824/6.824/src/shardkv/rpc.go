@@ -188,13 +188,13 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 
 	kv.DPrintf("recv pullShard %d request: ", args.Shard)
 	actualShardCfgNum := kv.shardState[args.Shard].CurrentCfg.Num
-	if kv.shardState[args.Shard].State == ReConfining {
+	if kv.shardState[args.Shard].State != Working && kv.shardState[args.Shard].State != PrepareReConfig {
 		actualShardCfgNum = kv.shardState[args.Shard].PrevCfg.Num
 	}
 	kv.DPrintf("now state: %s, %d, %d", kv.shardState[args.Shard].State, args.PrevCfg.Num, actualShardCfgNum)
 	if args.PrevCfg.Num == actualShardCfgNum {
 		// 必须等到本服务器也开始迁移分片才能回复，否则数据库数据是不完全的
-		if kv.shardState[args.Shard].State != ReConfining {
+		if kv.shardState[args.Shard].State != WaitingToBePulled {
 			reply.Err = ErrRetry
 			return
 		}

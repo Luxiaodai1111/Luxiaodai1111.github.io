@@ -31,9 +31,11 @@ const (
 	ExecuteTimeout = time.Millisecond * 500
 
 	// 分片状态
-	Working         = "Working"
-	PrepareReConfig = "PrepareReConfig"
-	ReConfining     = "ReConfining"
+	Working           = "Working"
+	PrepareReConfig   = "PrepareReConfig"
+	PreparePull       = "PreparePull"
+	Pulling           = "Pulling"
+	WaitingToBePulled = "WaitingToBePulled"
 
 	// 日志类型
 	CommandLog     = "CommandLog"

@@ -99,32 +99,6 @@ func (kv *ShardKV) restoreFromSnap(snapshot []byte, snapshotIndex int) {
 	}
 	kv.dupCommand = kv.restoreDupHistorySnap(dupCommandHistorySnap)
 
-	for shard, info := range kv.shardState {
-		if info.State == ReConfining {
-			kv.DPrintf("recieve snap, reConfining shard %d need handle", shard)
-			prevGID := info.PrevCfg.Shards[shard]
-			nowGID := info.CurrentCfg.Shards[shard]
-			if nowGID == kv.gid {
-				if prevGID == kv.gid || prevGID == 0 {
-					kv.DPrintf("shard %d' gid not change: cfg num up to %d", shard, info.CurrentCfg.Num)
-					kv.shardState[shard].State = Working
-				} else {
-					go kv.pullShard(*info.PrevCfg, shard, prevGID)
-				}
-			} else {
-				if prevGID != kv.gid {
-					kv.DPrintf("shard %d' gid not change: cfg num up to %d", shard, info.CurrentCfg.Num)
-					kv.shardState[shard].State = Working
-				} else {
-					// 等待被拉取分片
-				}
-			}
-			if prevGID == kv.gid && nowGID == 0 {
-				panic(fmt.Sprintf("[panic] nowGID is 0"))
-			}
-		}
-	}
-
 	// lastApplyIndex 到快照之间的修改请求一定会包含在查重哈希表里
 	// 对于读只需要让客户端重新尝试即可
 	reply := &CommonReply{

@@ -94,7 +94,6 @@ func (kv *ShardKV) applyPullShard(args *PullShardLogArgs, applyLogIndex int) {
 		}
 	}
 
-	kv.shardState[args.Shard].State = ReConfining
 	kv.shardState[args.Shard].PrevCfg = &args.PrevCfg
 	kv.shardState[args.Shard].CurrentCfg = &args.UpdateCfg
 	kv.DPrintf("update pull shard %d prevCfg:%+v, currentCfg: %+v", args.Shard,
@@ -107,7 +106,8 @@ func (kv *ShardKV) applyPullShard(args *PullShardLogArgs, applyLogIndex int) {
 			kv.DPrintf("shard %d' gid not change: cfg num up to %d", args.Shard, kv.shardState[args.Shard].CurrentCfg.Num)
 			kv.shardState[args.Shard].State = Working
 		} else {
-			go kv.pullShard(*kv.shardState[args.Shard].PrevCfg, args.Shard, prevGID)
+			// 由 kv.pullShard 异步去拉取分片
+			kv.shardState[args.Shard].State = PreparePull
 		}
 	} else {
 		if prevGID != kv.gid {
@@ -115,6 +115,7 @@ func (kv *ShardKV) applyPullShard(args *PullShardLogArgs, applyLogIndex int) {
 			kv.shardState[args.Shard].State = Working
 		} else {
 			// 等待被拉取分片
+			kv.shardState[args.Shard].State = WaitingToBePulled
 		}
 	}
 	if prevGID == kv.gid && nowGID == 0 {
@@ -138,7 +139,9 @@ func (kv *ShardKV) applyUpdateShard(args *UpdateShardLogArgs, applyLogIndex int)
 	defer kv.Unlock("applyUpdateShard")
 	prevGID := kv.shardState[args.Shard].PrevCfg.Shards[args.Shard]
 	nowGID := kv.shardState[args.Shard].CurrentCfg.Shards[args.Shard]
-	if kv.shardState[args.Shard].State == ReConfining && kv.shardState[args.Shard].PrevCfg.Num == args.ShardCfgNum &&
+	state := kv.shardState[args.Shard].State
+	if (state == PreparePull || state == Pulling) &&
+		kv.shardState[args.Shard].PrevCfg.Num == args.ShardCfgNum &&
 		nowGID == kv.gid && prevGID != kv.gid && prevGID != 0 {
 		kv.shardState[args.Shard].State = Working
 		for k, v := range args.Data {
@@ -165,7 +168,7 @@ func (kv *ShardKV) applyDeleteShard(args *DeleteShardArgs, applyLogIndex int) {
 	defer kv.Unlock("applyDeleteShard")
 
 	// 防止重复应用同一条修改命令
-	if kv.shardState[args.Shard].State == ReConfining && kv.shardState[args.Shard].PrevCfg.Num == args.ShardCfgNum {
+	if kv.shardState[args.Shard].State == WaitingToBePulled && kv.shardState[args.Shard].PrevCfg.Num == args.ShardCfgNum {
 		kv.shardState[args.Shard].State = Working
 		for k, _ := range kv.db {
 			if key2shard(k) == args.Shard {

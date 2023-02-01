@@ -109,59 +109,14 @@ func (kv *ShardKV) checkShard(key string, reply *CommonReply) bool {
 	}
 
 	// 之前不负责，现在需要负责的分片，等待分片传输完成再服务
-	if shardInfo.State == ReConfining &&
+	if (shardInfo.State == PreparePull || shardInfo.State == Pulling) &&
 		shardInfo.PrevCfg.Shards[shard] != kv.gid && shardInfo.CurrentCfg.Shards[shard] == kv.gid {
 		reply.Err = ErrRetry
-		kv.DPrintf("Waiting for key %s (shard %d) migration", key, shard)
+		kv.DPrintf("[%s]: Waiting for key %s (shard %d) migration", shardInfo.State, key, shard)
 		return true
 	}
 
 	return false
-}
-
-func (kv *ShardKV) pullShard(prevCfg shardctrler.Config, shard, dstGID int) {
-	kv.DPrintf("=== pullShard %d from %d ===", shard, dstGID)
-	args := PullShardArgs{
-		Shard:   shard,
-		PrevCfg: prevCfg,
-	}
-	gidServers := args.PrevCfg.Groups[dstGID]
-	for kv.killed() == false {
-		// 快照可能导致状态更新（比如其余成员已经拉取成功应用并快照同步），所以需要判断是否还要拉取分片数据
-		kv.RLock("checkpullShard")
-		prevGID := kv.shardState[shard].PrevCfg.Shards[shard]
-		prevNum := kv.shardState[shard].PrevCfg.Num
-		nowGID := kv.shardState[shard].CurrentCfg.Shards[shard]
-		state := kv.shardState[args.Shard].State
-		kv.RUnlock("checkpullShard")
-		if state == ReConfining && prevNum == args.PrevCfg.Num &&
-			nowGID == kv.gid && prevGID != kv.gid && prevGID != 0 {
-			// try each server for the shard.
-			for si := 0; si < len(gidServers); si++ {
-				srv := kv.make_end(gidServers[si])
-				var reply PullShardReply
-				ok := srv.Call("ShardKV.PullShard", &args, &reply)
-				if ok {
-					if reply.Err == OK {
-						kv.DPrintf("=== pullShard %d from %d success, cfg num up to %d ===", shard, dstGID, kv.shardState[shard].CurrentCfg.Num)
-						// 写入拉取成功日志
-						kv.WriteLog(UpdateShardLog, UpdateShardLogArgs{
-							Shard:       shard,
-							ShardCfgNum: prevCfg.Num,
-							Data:        reply.Data,
-						})
-						return
-					}
-				}
-			}
-		} else {
-			kv.DPrintf("stop pull shard %d: [state] %s [prevNum] %d [args.PrevCfg.Num] %d [nowGID] %d [prevGID] %d",
-				shard, state, prevNum, args.PrevCfg.Num, nowGID, prevGID)
-			return
-		}
-
-		time.Sleep(100 * time.Millisecond)
-	}
 }
 
 // WriteLog 写入日志直到成功，重复写入也没关系，在 apply 处理即可
@@ -263,13 +218,6 @@ func (kv *ShardKV) updateConfig() {
 
 			// WriteLog 只有 applyReConfig 成功才会返回
 			kv.WriteLog(ReConfigLog, args)
-
-			//kv.Lock("updateConfig")
-			//if args.UpdateCfg.Num == len(kv.configs) {
-			//	kv.configs = append(kv.configs, args.UpdateCfg)
-			//	kv.DPrintf("update configs: %+v", kv.configs)
-			//}
-			//kv.Unlock("updateConfig")
 		} else {
 			kv.RUnlock("checkConfigUpdate")
 		}
@@ -302,6 +250,63 @@ func (kv *ShardKV) updatePullShardLog() {
 			}
 		}
 		kv.Unlock("updatePullShardLog")
+	}
+}
+
+func (kv *ShardKV) pullShard() {
+	ticker := time.NewTicker(time.Millisecond * 100)
+	for kv.killed() == false {
+		select {
+		case <-ticker.C:
+		}
+
+		_, isleader := kv.rf.GetState()
+		if !isleader {
+			continue
+		}
+
+		kv.Lock("pullShard")
+		for shard, info := range kv.shardState {
+			prevGID := info.PrevCfg.Shards[shard]
+			nowGID := info.CurrentCfg.Shards[shard]
+			if kv.shardState[shard].State == PreparePull && nowGID == kv.gid && prevGID != kv.gid && prevGID != 0 {
+				kv.DPrintf("=== %s %d from %d ===", kv.shardState[shard].State, shard, prevGID)
+				kv.shardState[shard].State = Pulling
+				go func(shard int, prevCfg shardctrler.Config) {
+					dstGID := prevCfg.Shards[shard]
+					gidServers := info.PrevCfg.Groups[dstGID]
+					kv.DPrintf("=== %s %d from %d ===", kv.shardState[shard].State, shard, dstGID)
+					args := PullShardArgs{
+						Shard:   shard,
+						PrevCfg: prevCfg,
+					}
+					// try each server for the shard.
+					for si := 0; si < len(gidServers); si++ {
+						srv := kv.make_end(gidServers[si])
+						var reply PullShardReply
+						ok := srv.Call("ShardKV.PullShard", &args, &reply)
+						if ok {
+							if reply.Err == OK {
+								kv.DPrintf("=== pullShard %d (cfg %d) from %d success ===", shard, prevCfg.Num, dstGID)
+								// 写入拉取成功日志
+								kv.WriteLog(UpdateShardLog, UpdateShardLogArgs{
+									Shard:       shard,
+									ShardCfgNum: prevCfg.Num,
+									Data:        reply.Data,
+								})
+								return
+							}
+						}
+					}
+					// 执行不成功则重新检测拉取
+					kv.Lock("PreparePull")
+					kv.shardState[shard].State = PreparePull
+					kv.Unlock("PreparePull")
+				}(shard, *info.PrevCfg)
+
+			}
+		}
+		kv.Unlock("pullShard")
 	}
 }
 
@@ -378,6 +383,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	go kv.updateConfig()       // 负责从 shardctrler 拉取配置，写入配置更新日志
 	go kv.updatePullShardLog() // 负责写入配置更改日志
+	go kv.pullShard()          // 检测是否需要去拉取分片
 	go kv.handleApply()        // 处理 raft apply
 
 	return kv
