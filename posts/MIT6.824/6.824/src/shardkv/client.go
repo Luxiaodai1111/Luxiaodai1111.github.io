@@ -107,6 +107,7 @@ func (ck *Clerk) Get(key string) string {
 					break
 				}
 				if ok && (reply.Err) == ErrRetry {
+					time.Sleep(10 * time.Millisecond)
 					goto retry
 				}
 				// ... not ok, or ErrWrongLeader

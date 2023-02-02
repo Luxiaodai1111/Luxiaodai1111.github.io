@@ -10,16 +10,16 @@ func (kv *ShardKV) applyCommand(command *CommandArgs, applyLogIndex int) {
 	var ok bool
 
 	kv.Lock("applyCommand")
-	defer kv.Unlock("applyCommand")
-	// 防止重复应用同一条修改命令
-	if command.Op != OpGet && kv.isDuplicateLog(CommandLog, command.ClientId, command.SequenceNum) {
-		kv.DPrintf("apply duplicate CommandLog: %+v", command)
-		goto replyCommand
-	}
-
 	// 检查当前是否服务分片
 	if kv.checkShard(command.Key, reply) {
 		goto replyCommand
+	}
+
+	// 检查重复请求
+	if command.Op != OpGet && kv.isDupModifyReq(command.ClientId, command.SequenceNum) {
+		kv.DPrintf("apply duplicate command: %+v", command)
+		kv.Unlock("applyCommand")
+		return
 	}
 
 	// 更新状态机
@@ -39,11 +39,15 @@ func (kv *ShardKV) applyCommand(command *CommandArgs, applyLogIndex int) {
 		}
 		kv.DPrintf("update <%s>:<%s>", command.Key, kv.db[command.Key])
 	}
+	if command.Op != OpGet {
+		kv.updateDupModifyReq(command.ClientId, command.SequenceNum)
+	}
 
 replyCommand:
-	if command.Op != OpGet {
-		kv.updateDupLog(CommandLog, command.ClientId, command.SequenceNum)
-	}
+	kv.Unlock("applyCommand")
+
+	kv.notifyChansLock.Lock()
+	defer kv.notifyChansLock.Unlock()
 	if _, ok = kv.notifyChans[applyLogIndex]; ok {
 		select {
 		case kv.notifyChans[applyLogIndex] <- reply:
@@ -57,7 +61,6 @@ func (kv *ShardKV) applyReConfig(args *ReConfigLogArgs, applyLogIndex int) {
 	reply := &CommonReply{Err: OK}
 
 	kv.Lock("applyReConfig")
-	defer kv.Unlock("applyReConfig")
 	// 防止重复应用同一条修改命令
 	if args.UpdateCfg.Num < len(kv.configs) {
 		kv.DPrintf("apply duplicate ReConfigLog: %+v", args)
@@ -67,7 +70,10 @@ func (kv *ShardKV) applyReConfig(args *ReConfigLogArgs, applyLogIndex int) {
 	} else {
 		panic(fmt.Sprintf("applyReConfig args:%+v kv.configs:%+v", args, kv.configs))
 	}
+	kv.Unlock("applyReConfig")
 
+	kv.notifyChansLock.Lock()
+	defer kv.notifyChansLock.Unlock()
 	if _, ok := kv.notifyChans[applyLogIndex]; ok {
 		select {
 		case kv.notifyChans[applyLogIndex] <- reply:
@@ -82,7 +88,6 @@ func (kv *ShardKV) applyPullShard(args *PullShardLogArgs, applyLogIndex int) {
 	var prevGID, nowGID int
 
 	kv.Lock("applyPullShard")
-	defer kv.Unlock("applyPullShard")
 	// 防止重复应用同一条修改命令
 	if kv.shardState[args.Shard].CurrentCfg.Num >= args.UpdateCfg.Num {
 		kv.DPrintf("apply duplicate PullShardLog: %+v", args)
@@ -123,6 +128,10 @@ func (kv *ShardKV) applyPullShard(args *PullShardLogArgs, applyLogIndex int) {
 	}
 
 replyCommand:
+	kv.Unlock("applyPullShard")
+
+	kv.notifyChansLock.Lock()
+	defer kv.notifyChansLock.Unlock()
 	if _, ok := kv.notifyChans[applyLogIndex]; ok {
 		select {
 		case kv.notifyChans[applyLogIndex] <- reply:
@@ -136,7 +145,6 @@ func (kv *ShardKV) applyUpdateShard(args *UpdateShardLogArgs, applyLogIndex int)
 	reply := &CommonReply{Err: OK}
 
 	kv.Lock("applyUpdateShard")
-	defer kv.Unlock("applyUpdateShard")
 	prevGID := kv.shardState[args.Shard].PrevCfg.Shards[args.Shard]
 	nowGID := kv.shardState[args.Shard].CurrentCfg.Shards[args.Shard]
 	state := kv.shardState[args.Shard].State
@@ -151,7 +159,10 @@ func (kv *ShardKV) applyUpdateShard(args *UpdateShardLogArgs, applyLogIndex int)
 	} else {
 		kv.DPrintf("apply duplicate UpdateShardLog: %+v", args)
 	}
+	kv.Unlock("applyUpdateShard")
 
+	kv.notifyChansLock.Lock()
+	defer kv.notifyChansLock.Unlock()
 	if _, ok := kv.notifyChans[applyLogIndex]; ok {
 		select {
 		case kv.notifyChans[applyLogIndex] <- reply:
@@ -165,8 +176,6 @@ func (kv *ShardKV) applyDeleteShard(args *DeleteShardArgs, applyLogIndex int) {
 	reply := &CommonReply{Err: OK}
 
 	kv.Lock("applyDeleteShard")
-	defer kv.Unlock("applyDeleteShard")
-
 	// 防止重复应用同一条修改命令
 	if kv.shardState[args.Shard].State == WaitingToBePulled && kv.shardState[args.Shard].PrevCfg.Num == args.ShardCfgNum {
 		kv.shardState[args.Shard].State = Working
@@ -179,7 +188,10 @@ func (kv *ShardKV) applyDeleteShard(args *DeleteShardArgs, applyLogIndex int) {
 	} else {
 		kv.DPrintf("apply duplicate DeleteShardLog: %+v", args)
 	}
+	kv.Unlock("applyDeleteShard")
 
+	kv.notifyChansLock.Lock()
+	defer kv.notifyChansLock.Unlock()
 	if _, ok := kv.notifyChans[applyLogIndex]; ok {
 		select {
 		case kv.notifyChans[applyLogIndex] <- reply:
@@ -208,6 +220,9 @@ func (kv *ShardKV) handleApply() {
 				kv.lastApplyIndex = applyLog.CommandIndex
 
 				switch op.LogType {
+				case NoOpLog:
+					// nothing to do
+					kv.DPrintf("recieve no op apply log: %d", applyLog.CommandIndex)
 				case CommandLog:
 					kv.DPrintf("recieve command apply log: %d, CommandArgs: %+v",
 						applyLog.CommandIndex, op.CommandArgs)

@@ -40,19 +40,22 @@ type ShardCtrler struct {
 
 	lastApplyIndex int
 
-	configs       []Config                     // indexed by config num
-	notifyChans   map[int]chan *CommonReply    // 监听请求 apply
-	dupReqHistory map[int64]map[int64]struct{} // 记录已经执行的修改命令，防止重复执行
+	configs          []Config                  // indexed by config num
+	notifyChans      map[int]chan *CommonReply // 监听请求 apply
+	dupModifyCommand map[int64]int64           // 记录每个客户端最后一条修改成功的序列号，防止重复执行
 }
 
 type Op = CommonArgs
 
 func (sc *ShardCtrler) Command(args *CommonArgs, reply *CommonReply) {
-	if args.Op != OpQuery && sc.isDuplicateRequest(args.ClientId, args.SequenceNum) {
-		sc.DPrintf("found duplicate request: %+v, reply history response", args)
+	sc.Lock("Command")
+	if args.Op != OpQuery && sc.isDupModifyReq(args.ClientId, args.SequenceNum) {
+		sc.DPrintf("duplicate command request: %+v, reply history response", args)
 		reply.Err = OK
+		sc.Unlock("Command")
 		return
 	}
+	sc.Unlock("Command")
 
 	index, term, isLeader := sc.rf.Start(*args)
 	if !isLeader {
@@ -125,20 +128,15 @@ func (sc *ShardCtrler) Raft() *raft.Raft {
 	return sc.rf
 }
 
-func (sc *ShardCtrler) updateDupReqHistory(clientId, sequenceNum int64) {
-	if _, ok := sc.dupReqHistory[clientId]; !ok {
-		sc.dupReqHistory[clientId] = make(map[int64]struct{})
+func (sc *ShardCtrler) updateDupModifyReq(clientId, sequenceNum int64) {
+	if sequenceNum > sc.dupModifyCommand[clientId] {
+		sc.dupModifyCommand[clientId] = sequenceNum
 	}
-	sc.dupReqHistory[clientId][sequenceNum] = struct{}{}
 }
 
-func (sc *ShardCtrler) isDuplicateRequest(clientId, sequenceNum int64) bool {
-	sc.Lock("isDuplicateRequest")
-	defer sc.Unlock("isDuplicateRequest")
-	if _, ok := sc.dupReqHistory[clientId]; ok {
-		if _, ok := sc.dupReqHistory[clientId][sequenceNum]; ok {
-			return true
-		}
+func (sc *ShardCtrler) isDupModifyReq(clientId, sequenceNum int64) bool {
+	if sequenceNum <= sc.dupModifyCommand[clientId] {
+		return true
 	}
 
 	return false
@@ -270,10 +268,10 @@ func (sc *ShardCtrler) handleApply() {
 				sc.lastApplyIndex = applyLog.CommandIndex
 
 				sc.DPrintf("recieve apply log: %d, op info: %+v", applyLog.CommandIndex, op)
-				// 防止重复应用同一条修改命令
-				if op.Op != OpQuery && sc.isDuplicateRequest(op.ClientId, op.SequenceNum) {
-					sc.DPrintf("found duplicate request: %+v", op)
-					goto replyCommand
+				// 检查重复请求
+				if op.Op != OpQuery && sc.isDupModifyReq(op.ClientId, op.SequenceNum) {
+					sc.DPrintf("apply duplicate command: %+v", op)
+					continue
 				}
 
 				// 更新状态机
@@ -335,10 +333,9 @@ func (sc *ShardCtrler) handleApply() {
 					sc.DPrintf("query config %d is %+v", idx, reply.Config)
 				}
 
-			replyCommand:
 				sc.Lock("replyCommand")
 				if op.Op != OpQuery {
-					sc.updateDupReqHistory(op.ClientId, op.SequenceNum)
+					sc.updateDupModifyReq(op.ClientId, op.SequenceNum)
 				}
 
 				if _, ok := sc.notifyChans[applyLog.CommandIndex]; ok {
@@ -377,7 +374,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sc.rf = raft.Make(servers, me, persister, sc.applyCh)
 
 	sc.notifyChans = make(map[int]chan *CommonReply)
-	sc.dupReqHistory = make(map[int64]map[int64]struct{})
+	sc.dupModifyCommand = make(map[int64]int64)
 
 	go sc.handleApply() // 处理 raft apply
 

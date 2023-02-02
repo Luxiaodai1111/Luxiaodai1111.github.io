@@ -38,6 +38,7 @@ const (
 	WaitingToBePulled = "WaitingToBePulled"
 
 	// 日志类型
+	NoOpLog        = "NoOpLog"
 	CommandLog     = "CommandLog"
 	ReConfigLog    = "ReConfigLog"
 	PullShardLog   = "PullShardLog"

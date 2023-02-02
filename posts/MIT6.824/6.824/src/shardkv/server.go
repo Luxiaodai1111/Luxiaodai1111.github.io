@@ -92,10 +92,11 @@ type ShardKV struct {
 
 	maxraftstate int // snapshot if log grows this big
 
-	lastApplyIndex int
-	db             map[string]string            // 内存数据库
-	notifyChans    map[int]chan *CommonReply    // 监听请求 apply
-	dupCommand     map[int64]map[int64]struct{} // 记录已经执行的修改命令，防止重复执行
+	lastApplyIndex   int
+	db               map[string]string         // 内存数据库
+	notifyChans      map[int]chan *CommonReply // 监听请求 apply
+	notifyChansLock  sync.Mutex
+	dupModifyCommand map[int64]int64 // 记录已经执行的修改命令，防止重复执行
 }
 
 func (kv *ShardKV) checkShard(key string, reply *CommonReply) bool {
@@ -150,7 +151,6 @@ func (kv *ShardKV) WriteLog(logType string, args interface{}) {
 			// try each server for the shard.
 			for si := 0; si < len(kv.servers); si++ {
 				srv := kv.servers[si]
-			retry:
 				var reply CommonReply
 				var ok bool
 				switch args.(type) {
@@ -172,10 +172,6 @@ func (kv *ShardKV) WriteLog(logType string, args interface{}) {
 				if ok && (reply.Err == OK) {
 					writeLogSuccess = true
 					break
-				}
-				if ok && (reply.Err == ErrRetry) {
-					kv.DPrintf("retry write %s %+v", logType, args)
-					goto retry
 				}
 			}
 		}
@@ -303,10 +299,25 @@ func (kv *ShardKV) pullShard() {
 					kv.shardState[shard].State = PreparePull
 					kv.Unlock("PreparePull")
 				}(shard, *info.PrevCfg)
-
 			}
 		}
 		kv.Unlock("pullShard")
+	}
+}
+
+func (kv *ShardKV) noOpLog() {
+	ticker := time.NewTicker(time.Millisecond * 100)
+	for kv.killed() == false {
+		select {
+		case <-ticker.C:
+		}
+
+		_, isleader := kv.rf.GetState()
+		if !isleader {
+			continue
+		}
+
+		kv.rf.NoOpLog(Op{LogType: NoOpLog})
 	}
 }
 
@@ -379,11 +390,12 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.lastApplyIndex = 0
 	kv.db = make(map[string]string)
 	kv.notifyChans = make(map[int]chan *CommonReply)
-	kv.dupCommand = make(map[int64]map[int64]struct{})
+	kv.dupModifyCommand = make(map[int64]int64)
 
 	go kv.updateConfig()       // 负责从 shardctrler 拉取配置，写入配置更新日志
 	go kv.updatePullShardLog() // 负责写入配置更改日志
 	go kv.pullShard()          // 检测是否需要去拉取分片
+	go kv.noOpLog()            // 定期检查是否需要提交空日志
 	go kv.handleApply()        // 处理 raft apply
 
 	return kv

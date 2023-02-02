@@ -113,6 +113,8 @@ func (rf *Raft) InstallSnapshot(request *InstallSnapshotArgs, response *InstallS
 		if rf.logs[idx].CommandIndex == request.LastSnapLog.CommandIndex &&
 			rf.logs[idx].Term == request.LastSnapLog.Term {
 			rf.logs = append([]LogEntry{}, rf.logs[idx:]...)
+			// 此时这条日志仅作记录作用
+			rf.logs[0].Command = nil
 			rf.DPrintf("update logs")
 			rf.printLog()
 			findMatchLog = true
@@ -120,7 +122,14 @@ func (rf *Raft) InstallSnapshot(request *InstallSnapshotArgs, response *InstallS
 		}
 	}
 	if !findMatchLog {
-		rf.logs = append([]LogEntry{}, request.LastSnapLog)
+		// 第一条日志仅作记录作用，不用记录内容
+		rf.logs = []LogEntry{
+			{
+				Term:         request.LastSnapLog.Term,
+				CommandIndex: request.LastSnapLog.CommandIndex,
+				Command:      nil,
+			},
+		}
 		rf.DPrintf("update logs")
 		rf.printLog()
 	}
@@ -677,6 +686,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// 保留最后一条日志用来记录 Last Snap Log
 	logIndex := index - rf.logs[0].CommandIndex
 	rf.logs = append([]LogEntry{}, rf.logs[logIndex:]...)
+	rf.logs[0].Command = nil
 
 	rf.SaveStateAndSnapshot(snapshot)
 }
@@ -793,6 +803,24 @@ func (rf *Raft) startElection() {
 				rf.DPrintf("RequestVote RPC to %d failed", peer)
 			}
 		}(peer)
+	}
+}
+
+// NoOpLog 配合状态机提交空日志防止提交阻塞
+// 当前最后一条日志的任期和当前任期不一致时，需要提交空日志来提交前面的日志
+func (rf *Raft) NoOpLog(command interface{}) {
+	rf.Lock("StartNoOp")
+	defer rf.Unlock("StartNoOp")
+	if rf.role == Leader && rf.getLastLog().Term != rf.currentTerm {
+		rf.DPrintf("====== start no op %+v ======", command)
+		log := LogEntry{
+			Term:         rf.currentTerm,
+			CommandIndex: rf.getLastLog().CommandIndex + 1,
+			Command:      command,
+		}
+		rf.logs = append(rf.logs, log)
+		rf.persist()
+		rf.broadcast()
 	}
 }
 

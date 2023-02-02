@@ -7,8 +7,6 @@ import (
 	"bytes"
 	"fmt"
 	"log"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -55,79 +53,81 @@ type KVServer struct {
 	maxraftstate   int // snapshot if log grows this big
 	lastApplyIndex int
 
-	db            map[string]string            // 内存数据库
-	notifyChans   map[int]chan *CommonReply    // 监听请求 apply
-	dupReqHistory map[int64]map[int64]struct{} // 记录已经执行的修改命令，防止重复执行
+	db               map[string]string         // 内存数据库
+	notifyChans      map[int]chan *CommonReply // 监听请求 apply
+	dupModifyCommand map[int64]int64           // 记录每个客户端最后一条修改成功的序列号，防止重复执行
 }
 
 type DupReqHistorySnap map[int64]string
 
-func (kv *KVServer) makeDupReqHistorySnap() DupReqHistorySnap {
-	snap := make(DupReqHistorySnap, 0)
-	for clientId, info := range kv.dupReqHistory {
-		var seqs []int64
-		for sequenceNum := range info {
-			seqs = append(seqs, sequenceNum)
-		}
-
-		// 排序
-		for i := 0; i <= len(seqs)-1; i++ {
-			for j := i; j <= len(seqs)-1; j++ {
-				if seqs[i] > seqs[j] {
-					t := seqs[i]
-					seqs[i] = seqs[j]
-					seqs[j] = t
-				}
-			}
-		}
-
-		// 将所有序列号压缩(记录和前一条的差值)成一条字符串
-		snapString := make([]string, len(seqs))
-		var prev int64
-		for idx, seq := range seqs {
-			if idx == 0 {
-				snapString = append(snapString, strconv.FormatInt(seq, 10))
-			} else {
-				snapString = append(snapString, strconv.FormatInt(seq-prev, 10))
-			}
-			prev = seq
-		}
-
-		snap[clientId] = strings.Join(snapString, "")
-	}
-
-	return snap
-}
-
-func (kv *KVServer) restoreDupReqHistorySnap(snap DupReqHistorySnap) {
-	kv.dupReqHistory = make(map[int64]map[int64]struct{})
-	for clientId, info := range snap {
-		if _, ok := kv.dupReqHistory[clientId]; !ok {
-			kv.dupReqHistory[clientId] = make(map[int64]struct{})
-		}
-
-		snapString := strings.Split(info, "")
-		var prev int64
-		for idx, value := range snapString {
-			if idx == 0 {
-				seq, _ := strconv.ParseInt(value, 10, 64)
-				prev = seq
-			} else {
-				seq, _ := strconv.ParseInt(value, 10, 64)
-				prev += seq
-			}
-			kv.dupReqHistory[clientId][prev] = struct{}{}
-		}
-	}
-}
+//func (kv *KVServer) makeDupReqHistorySnap() DupReqHistorySnap {
+//	snap := make(DupReqHistorySnap, 0)
+//	for clientId, info := range kv.dupModifyCommand {
+//		var seqs []int64
+//		for sequenceNum := range info {
+//			seqs = append(seqs, sequenceNum)
+//		}
+//
+//		// 排序
+//		for i := 0; i <= len(seqs)-1; i++ {
+//			for j := i; j <= len(seqs)-1; j++ {
+//				if seqs[i] > seqs[j] {
+//					t := seqs[i]
+//					seqs[i] = seqs[j]
+//					seqs[j] = t
+//				}
+//			}
+//		}
+//
+//		// 将所有序列号压缩(记录和前一条的差值)成一条字符串
+//		snapString := make([]string, len(seqs))
+//		var prev int64
+//		for idx, seq := range seqs {
+//			if idx == 0 {
+//				snapString = append(snapString, strconv.FormatInt(seq, 10))
+//			} else {
+//				snapString = append(snapString, strconv.FormatInt(seq-prev, 10))
+//			}
+//			prev = seq
+//		}
+//
+//		snap[clientId] = strings.Join(snapString, "")
+//	}
+//
+//	return snap
+//}
+//
+//func (kv *KVServer) restoreDupReqHistorySnap(snap DupReqHistorySnap) {
+//	kv.dupModifyCommand = make(map[int64]map[int64]struct{})
+//	for clientId, info := range snap {
+//		if _, ok := kv.dupModifyCommand[clientId]; !ok {
+//			kv.dupModifyCommand[clientId] = make(map[int64]struct{})
+//		}
+//
+//		snapString := strings.Split(info, "")
+//		var prev int64
+//		for idx, value := range snapString {
+//			if idx == 0 {
+//				seq, _ := strconv.ParseInt(value, 10, 64)
+//				prev = seq
+//			} else {
+//				seq, _ := strconv.ParseInt(value, 10, 64)
+//				prev += seq
+//			}
+//			kv.dupModifyCommand[clientId][prev] = struct{}{}
+//		}
+//	}
+//}
 
 func (kv *KVServer) Command(args *CommonArgs, reply *CommonReply) {
-	// 修改请求重复
-	if args.Op != OpGet && kv.isDuplicateRequest(args.ClientId, args.SequenceNum) {
-		kv.DPrintf("found duplicate request: %+v, reply history response", args)
+	kv.RLock("Command")
+	if args.Op != OpGet && kv.isDupModifyReq(args.ClientId, args.SequenceNum) {
+		kv.DPrintf("duplicate command request: %+v, reply history response", args)
 		reply.Err = OK
+		kv.RUnlock("Command")
 		return
 	}
+	kv.RUnlock("Command")
 
 	/*
 	 * 要使用 term 和 index 来代表一条日志
@@ -183,20 +183,15 @@ func (kv *KVServer) PutAppend(args *CommonArgs, reply *CommonReply) {
 	kv.Command(args, reply)
 }
 
-func (kv *KVServer) updateDupReqHistory(clientId, sequenceNum int64) {
-	if _, ok := kv.dupReqHistory[clientId]; !ok {
-		kv.dupReqHistory[clientId] = make(map[int64]struct{})
+func (kv *KVServer) updateDupModifyReq(clientId, sequenceNum int64) {
+	if sequenceNum > kv.dupModifyCommand[clientId] {
+		kv.dupModifyCommand[clientId] = sequenceNum
 	}
-	kv.dupReqHistory[clientId][sequenceNum] = struct{}{}
 }
 
-func (kv *KVServer) isDuplicateRequest(clientId, sequenceNum int64) bool {
-	kv.RLock("isDuplicateRequest")
-	defer kv.RUnlock("isDuplicateRequest")
-	if _, ok := kv.dupReqHistory[clientId]; ok {
-		if _, ok := kv.dupReqHistory[clientId][sequenceNum]; ok {
-			return true
-		}
+func (kv *KVServer) isDupModifyReq(clientId, sequenceNum int64) bool {
+	if sequenceNum <= kv.dupModifyCommand[clientId] {
+		return true
 	}
 
 	return false
@@ -226,10 +221,11 @@ func (kv *KVServer) handleApply() {
 				kv.lastApplyIndex = applyLog.CommandIndex
 
 				kv.DPrintf("recieve apply log: %d, op info: %+v", applyLog.CommandIndex, op)
-				// 防止重复应用同一条修改命令
-				if op.Op != OpGet && kv.isDuplicateRequest(op.ClientId, op.SequenceNum) {
-					kv.DPrintf("found duplicate request: %+v", op)
-					goto replyCommand
+				// 检查重复请求
+				if op.Op != OpGet && kv.isDupModifyReq(op.ClientId, op.SequenceNum) {
+					kv.DPrintf("apply duplicate command: %+v", op)
+					// 同一客户端某个序号请求没有返回成功就不会有大于它的序号请求产生，所以重复的请求没有必要回复
+					continue
 				}
 
 				// 更新状态机
@@ -250,10 +246,9 @@ func (kv *KVServer) handleApply() {
 					kv.DPrintf("update <%s>:<%s>", op.Key, kv.db[op.Key])
 				}
 
-			replyCommand:
 				kv.Lock("replyCommand")
 				if op.Op != OpGet {
-					kv.updateDupReqHistory(op.ClientId, op.SequenceNum)
+					kv.updateDupModifyReq(op.ClientId, op.SequenceNum)
 				}
 				/*
 				 * 只要有通道存在，说明可能是当前 leader，也可能曾经作为 leader 接收过请求
@@ -275,8 +270,7 @@ func (kv *KVServer) handleApply() {
 					w := new(bytes.Buffer)
 					e := labgob.NewEncoder(w)
 					kv.Lock("snap")
-					dupReqHistorySnap := kv.makeDupReqHistorySnap()
-					if e.Encode(kv.db) != nil || e.Encode(dupReqHistorySnap) != nil {
+					if e.Encode(kv.db) != nil || e.Encode(kv.dupModifyCommand) != nil {
 						kv.Unlock("snap")
 						panic(fmt.Sprintf("[panic] encode snap error"))
 					}
@@ -297,16 +291,14 @@ func (kv *KVServer) handleApply() {
 				d := labgob.NewDecoder(r)
 				kv.Lock("applySnap")
 				kv.db = make(map[string]string)
-				var dupReqHistorySnap DupReqHistorySnap
-				if d.Decode(&kv.db) != nil || d.Decode(&dupReqHistorySnap) != nil {
+				if d.Decode(&kv.db) != nil || d.Decode(&kv.dupModifyCommand) != nil {
 					kv.Unlock("applySnap")
 					panic(fmt.Sprintf("[panic] decode snap error"))
 				}
-				kv.restoreDupReqHistorySnap(dupReqHistorySnap)
 				kv.Unlock("applySnap")
 
 				// lastApplyIndex 到快照之间的修改请求一定会包含在查重哈希表里
-				// 对于读只需要让客户端重新尝试即可
+				// 对于读只需要让客户端重新尝试即可满足线性一致
 				kv.Lock("replyCommand")
 				reply := &CommonReply{
 					Err: ApplySnap,
@@ -319,8 +311,8 @@ func (kv *KVServer) handleApply() {
 						}
 					}
 				}
-				kv.Unlock("replyCommand")
 				kv.lastApplyIndex = applyLog.SnapshotIndex
+				kv.Unlock("replyCommand")
 			} else {
 				panic(fmt.Sprintf("[panic] unexpected applyLog %+v", applyLog))
 			}
@@ -376,7 +368,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.db = make(map[string]string)
 	kv.notifyChans = make(map[int]chan *CommonReply)
-	kv.dupReqHistory = make(map[int64]map[int64]struct{})
+	kv.dupModifyCommand = make(map[int64]int64)
 
 	go kv.handleApply() // 处理 raft apply
 

@@ -5,12 +5,6 @@ import (
 )
 
 func (kv *ShardKV) Command(args *CommandArgs, reply *CommonReply) {
-	if args.Op != OpGet && kv.isDuplicateLogWithLock(CommandLog, args.ClientId, args.SequenceNum) {
-		kv.DPrintf("duplicate command request: %+v, reply history response", args)
-		reply.Err = OK
-		return
-	}
-
 	kv.RLock("checkShard")
 	if kv.checkShard(args.Key, reply) {
 		kv.RUnlock("checkShard")
@@ -18,6 +12,15 @@ func (kv *ShardKV) Command(args *CommandArgs, reply *CommonReply) {
 		return
 	}
 	kv.RUnlock("checkShard")
+
+	kv.RLock("Command")
+	if args.Op != OpGet && kv.isDupModifyReq(args.ClientId, args.SequenceNum) {
+		kv.DPrintf("duplicate command request: %+v, reply history response", args)
+		reply.Err = OK
+		kv.RUnlock("Command")
+		return
+	}
+	kv.RUnlock("Command")
 
 	index, term, isLeader := kv.rf.Start(Op{
 		LogType:     CommandLog,
@@ -28,11 +31,11 @@ func (kv *ShardKV) Command(args *CommandArgs, reply *CommonReply) {
 		return
 	}
 
-	kv.Lock("getNotifyChan")
+	kv.notifyChansLock.Lock()
 	if _, ok := kv.notifyChans[index]; !ok {
 		kv.notifyChans[index] = make(chan *CommonReply)
 	}
-	kv.Unlock("getNotifyChan")
+	kv.notifyChansLock.Unlock()
 
 	select {
 	case result := <-kv.notifyChans[index]:
@@ -66,8 +69,8 @@ func (kv *ShardKV) Command(args *CommandArgs, reply *CommonReply) {
 		reply.Err = ErrTimeout
 	}
 
-	kv.Lock("Command")
-	defer kv.Unlock("Command")
+	kv.notifyChansLock.Lock()
+	defer kv.notifyChansLock.Unlock()
 	close(kv.notifyChans[index])
 	delete(kv.notifyChans, index)
 }
@@ -86,11 +89,11 @@ func (kv *ShardKV) replyCommon(index, term int, isLeader bool, reply *CommonRepl
 		return
 	}
 
-	kv.Lock("getNotifyChan")
+	kv.notifyChansLock.Lock()
 	if _, ok := kv.notifyChans[index]; !ok {
 		kv.notifyChans[index] = make(chan *CommonReply)
 	}
-	kv.Unlock("getNotifyChan")
+	kv.notifyChansLock.Unlock()
 
 	select {
 	case result := <-kv.notifyChans[index]:
@@ -112,8 +115,8 @@ func (kv *ShardKV) replyCommon(index, term int, isLeader bool, reply *CommonRepl
 		reply.Err = ErrTimeout
 	}
 
-	kv.Lock("cleanNotifyChan")
-	defer kv.Unlock("cleanNotifyChan")
+	kv.notifyChansLock.Lock()
+	defer kv.notifyChansLock.Unlock()
 	close(kv.notifyChans[index])
 	delete(kv.notifyChans, index)
 }
@@ -183,10 +186,11 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 		return
 	}
 
+	kv.DPrintf("recv pullShard %d request: ", args.Shard)
+
 	kv.Lock("PullShard")
 	defer kv.Unlock("PullShard")
 
-	kv.DPrintf("recv pullShard %d request: ", args.Shard)
 	actualShardCfgNum := kv.shardState[args.Shard].CurrentCfg.Num
 	if kv.shardState[args.Shard].State != Working && kv.shardState[args.Shard].State != PrepareReConfig {
 		actualShardCfgNum = kv.shardState[args.Shard].PrevCfg.Num

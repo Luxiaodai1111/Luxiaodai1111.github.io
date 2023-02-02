@@ -11,7 +11,7 @@ import (
 
 func (ck *Clerk) DPrintf(format string, a ...interface{}) {
 	if Debug {
-		log.Printf(fmt.Sprintf("[Clerk]:%s", format), a...)
+		log.Printf(fmt.Sprintf("[Clerk][Seq %d]:%s", ck.maxSequenceNum, format), a...)
 	}
 	return
 }
@@ -52,13 +52,13 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
+	ck.maxSequenceNum += 1
 	ck.DPrintf("=== request get key: %s ===", key)
-
 	args := &CommonArgs{
 		Key:         key,
 		Op:          OpGet,
 		ClientId:    ck.clientId,
-		SequenceNum: atomic.AddInt64(&ck.maxSequenceNum, 1),
+		SequenceNum: ck.maxSequenceNum,
 	}
 
 	leader := ck.leader
@@ -98,6 +98,7 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	ck.DPrintf("=== request %s <%s>:<%s> ===", op, key, value)
 
+	ck.maxSequenceNum += 1
 	args := &CommonArgs{
 		Key:         key,
 		Value:       value,

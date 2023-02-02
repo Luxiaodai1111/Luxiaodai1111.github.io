@@ -5,72 +5,7 @@ import (
 	"6.824/shardctrler"
 	"bytes"
 	"fmt"
-	"strconv"
-	"strings"
 )
-
-type DupHistorySnap map[int64]string
-
-func (kv *ShardKV) encodeDupHistory(dupMap map[int64]map[int64]struct{}) DupHistorySnap {
-	snap := make(DupHistorySnap, 0)
-	for clientId, info := range dupMap {
-		var seqs []int64
-		for sequenceNum := range info {
-			seqs = append(seqs, sequenceNum)
-		}
-
-		// 排序
-		for i := 0; i <= len(seqs)-1; i++ {
-			for j := i; j <= len(seqs)-1; j++ {
-				if seqs[i] > seqs[j] {
-					t := seqs[i]
-					seqs[i] = seqs[j]
-					seqs[j] = t
-				}
-			}
-		}
-
-		// 将所有序列号压缩(记录和前一条的差值)成一条字符串
-		snapString := make([]string, len(seqs))
-		var prev int64
-		for idx, seq := range seqs {
-			if idx == 0 {
-				snapString = append(snapString, strconv.FormatInt(seq, 10))
-			} else {
-				snapString = append(snapString, strconv.FormatInt(seq-prev, 10))
-			}
-			prev = seq
-		}
-
-		snap[clientId] = strings.Join(snapString, "")
-	}
-
-	return snap
-}
-
-func (kv *ShardKV) decodeDupHistory(snap DupHistorySnap) map[int64]map[int64]struct{} {
-	dupMap := make(map[int64]map[int64]struct{})
-	for clientId, info := range snap {
-		if _, ok := dupMap[clientId]; !ok {
-			dupMap[clientId] = make(map[int64]struct{})
-		}
-
-		snapString := strings.Split(info, "")
-		var prev int64
-		for idx, value := range snapString {
-			if idx == 0 {
-				seq, _ := strconv.ParseInt(value, 10, 64)
-				prev = seq
-			} else {
-				seq, _ := strconv.ParseInt(value, 10, 64)
-				prev += seq
-			}
-			dupMap[clientId][prev] = struct{}{}
-		}
-	}
-
-	return dupMap
-}
 
 type ShardStateSnap map[int]*ShardStateSimple
 
@@ -108,11 +43,11 @@ func (kv *ShardKV) makeSnap(applyLogIndex int) {
 
 	kv.Lock("makeSnap")
 	defer kv.Unlock("makeSnap")
-	dupCommandHistorySnap := kv.encodeDupHistory(kv.dupCommand)
 	shardStateSnap := kv.encodeShardState()
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	if e.Encode(kv.db) != nil || e.Encode(kv.configs) != nil || e.Encode(shardStateSnap) != nil || e.Encode(dupCommandHistorySnap) != nil {
+	if e.Encode(kv.db) != nil || e.Encode(kv.configs) != nil ||
+		e.Encode(shardStateSnap) != nil || e.Encode(kv.dupModifyCommand) != nil {
 		panic(fmt.Sprintf("[panic] encode snap error"))
 	}
 	data := w.Bytes()
@@ -122,23 +57,23 @@ func (kv *ShardKV) makeSnap(applyLogIndex int) {
 
 func (kv *ShardKV) restoreFromSnap(snapshot []byte, snapshotIndex int) {
 	kv.Lock("restoreFromSnap")
-	defer kv.Unlock("restoreFromSnap")
-
-	var dupCommandHistorySnap DupHistorySnap
 	var shardStateSnap ShardStateSnap
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
-	if d.Decode(&kv.db) != nil || d.Decode(&kv.configs) != nil || d.Decode(&shardStateSnap) != nil || d.Decode(&dupCommandHistorySnap) != nil {
+	if d.Decode(&kv.db) != nil || d.Decode(&kv.configs) != nil ||
+		d.Decode(&shardStateSnap) != nil || d.Decode(&kv.dupModifyCommand) != nil {
 		panic(fmt.Sprintf("[panic] decode snap error"))
 	}
-	kv.dupCommand = kv.decodeDupHistory(dupCommandHistorySnap)
 	kv.decodeShardState(shardStateSnap)
+	kv.lastApplyIndex = snapshotIndex
+	kv.Unlock("restoreFromSnap")
 
 	// lastApplyIndex 到快照之间的修改请求一定会包含在查重哈希表里
 	// 对于读只需要让客户端重新尝试即可
 	reply := &CommonReply{
 		Err: ApplySnap,
 	}
+	kv.notifyChansLock.Lock()
 	for idx := kv.lastApplyIndex + 1; idx <= snapshotIndex; idx++ {
 		if _, ok := kv.notifyChans[idx]; ok {
 			select {
@@ -147,6 +82,6 @@ func (kv *ShardKV) restoreFromSnap(snapshot []byte, snapshotIndex int) {
 			}
 		}
 	}
-	kv.lastApplyIndex = snapshotIndex
+	kv.notifyChansLock.Unlock()
 	return
 }
