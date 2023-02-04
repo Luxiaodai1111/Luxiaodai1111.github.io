@@ -78,6 +78,16 @@ func (rf *Raft) Unlock(owner string) {
 	rf.mu.Unlock()
 }
 
+func (rf *Raft) RLock(owner string) {
+	//rf.DPrintf("%s RLock", owner)
+	rf.mu.RLock()
+}
+
+func (rf *Raft) RUnlock(owner string) {
+	//rf.DPrintf("%s RUnlock", owner)
+	rf.mu.RUnlock()
+}
+
 // NeedSnapshot 供上层判断是否需要执行快照
 func (rf *Raft) RaftStateNeedSnapshot(maxraftstate int) bool {
 	if maxraftstate != -1 && rf.persister.RaftStateSize()*100/maxraftstate >= 90 {
@@ -153,9 +163,9 @@ func (rf *Raft) InstallSnapshot(request *InstallSnapshotArgs, response *InstallS
 }
 
 func (rf *Raft) sendSnap(peer int) {
-	rf.Lock("sendSnap")
+	rf.RLock("sendSnap")
 	if rf.role != Leader {
-		rf.Unlock("sendSnap")
+		rf.RUnlock("sendSnap")
 		rf.DPrintf("now is not leader, cancel send snap")
 		return
 	}
@@ -168,7 +178,7 @@ func (rf *Raft) sendSnap(peer int) {
 		Done:        true, // 不分片，一次传输
 		LastSnapLog: rf.logs[0],
 	}
-	rf.Unlock("sendSnap")
+	rf.RUnlock("sendSnap")
 
 	rf.DPrintf("====== sendSnap %d to %d ======", request.LastSnapLog.CommandIndex, peer)
 	response := new(InstallSnapshotReply)
@@ -191,7 +201,7 @@ func (rf *Raft) sendSnap(peer int) {
 
 		rf.matchIndex[peer] = request.LastSnapLog.CommandIndex
 		rf.nextIndex[peer] = rf.matchIndex[peer] + 1
-		rf.DPrintf("peer %d's matchIndex is %d", peer, rf.matchIndex[peer])
+		rf.DPrintf("peer %d's matchIndex update to %d", peer, rf.matchIndex[peer])
 		// 更新提交索引
 		rf.updateCommitIndex()
 
@@ -376,9 +386,9 @@ func (rf *Raft) checkTerm(peer int, term int, delayPersist bool) (needPersist bo
 }
 
 func (rf *Raft) replicate(peer int) {
-	rf.Lock("replicate")
+	rf.RLock("replicate")
 	if rf.role != Leader {
-		rf.Unlock("replicate")
+		rf.RUnlock("replicate")
 		rf.DPrintf("now is not leader, cancel send append entries")
 		return
 	}
@@ -391,7 +401,7 @@ func (rf *Raft) replicate(peer int) {
 
 	if rf.nextIndex[peer] <= rf.logs[0].CommandIndex {
 		go rf.sendSnap(peer)
-		rf.Unlock("replicate")
+		rf.RUnlock("replicate")
 		return
 	}
 
@@ -414,7 +424,7 @@ func (rf *Raft) replicate(peer int) {
 		request.PrevLogTerm = rf.log(rf.nextIndex[peer] - 1).Term
 		rf.DPrintf("send heartbeat %+v to %d", request, peer)
 	}
-	rf.Unlock("replicate")
+	rf.RUnlock("replicate")
 
 	response := new(AppendEntriesReply)
 	if rf.sendAppendEntries(peer, request, response) {
@@ -442,7 +452,7 @@ func (rf *Raft) replicate(peer int) {
 			if lastEntryIndex > rf.matchIndex[peer] {
 				rf.matchIndex[peer] = lastEntryIndex
 				rf.nextIndex[peer] = rf.matchIndex[peer] + 1
-				rf.DPrintf("peer %d's matchIndex is %d", peer, rf.matchIndex[peer])
+				rf.DPrintf("peer %d's matchIndex update to %d", peer, rf.matchIndex[peer])
 				// 更新提交索引
 				rf.updateCommitIndex()
 			}
@@ -502,7 +512,7 @@ func (rf *Raft) broadcast() {
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	mu        sync.RWMutex        // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -564,8 +574,8 @@ func (rf *Raft) ResetElectionTimeout() {
 func (rf *Raft) GetState() (int, bool) {
 	var isleader bool
 
-	rf.Lock("GetState")
-	defer rf.Unlock("GetState")
+	rf.RLock("GetState")
+	defer rf.RUnlock("GetState")
 	if rf.role == Leader {
 		isleader = true
 	} else {
@@ -754,13 +764,13 @@ func (rf *Raft) startElection() {
 			continue
 		}
 		go func(peer int) {
-			rf.Lock("sendRequestVote")
+			rf.RLock("sendRequestVote")
 			if rf.role != Candidate {
-				rf.Unlock("sendRequestVote")
+				rf.RUnlock("sendRequestVote")
 				rf.DPrintf("now is not candidate")
 				return
 			}
-			rf.Unlock("sendRequestVote")
+			rf.RUnlock("sendRequestVote")
 
 			response := new(RequestVoteReply)
 			rf.DPrintf("send RequestVote %+v to %d", request, peer)

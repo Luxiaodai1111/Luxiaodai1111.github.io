@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
-	"sync/atomic"
+	"time"
 )
 
 func (ck *Clerk) DPrintf(format string, a ...interface{}) {
@@ -53,7 +53,10 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 //
 func (ck *Clerk) Get(key string) string {
 	ck.maxSequenceNum += 1
+
 	ck.DPrintf("=== request get key: %s ===", key)
+	start := time.Now()
+
 	args := &CommonArgs{
 		Key:         key,
 		Op:          OpGet,
@@ -67,7 +70,8 @@ func (ck *Clerk) Get(key string) string {
 		ok := ck.servers[leader].Call("KVServer.Get", args, reply)
 		if ok {
 			if reply.Err == OK {
-				ck.DPrintf("=== get <%s>:<%s> from leader %d success ===", key, reply.Value, leader)
+				ck.DPrintf("=== get <%s>:<%s> from leader %d success, cost %d ms ===",
+					key, reply.Value, leader, time.Now().Sub(start)/time.Millisecond)
 				ck.leader = leader
 				return reply.Value
 			} else if reply.Err == ErrNoKey {
@@ -96,15 +100,17 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	ck.DPrintf("=== request %s <%s>:<%s> ===", op, key, value)
-
 	ck.maxSequenceNum += 1
+
+	ck.DPrintf("=== request %s <%s>:<%s> ===", op, key, value)
+	start := time.Now()
+
 	args := &CommonArgs{
 		Key:         key,
 		Value:       value,
 		Op:          op,
 		ClientId:    ck.clientId,
-		SequenceNum: atomic.AddInt64(&ck.maxSequenceNum, 1),
+		SequenceNum: ck.maxSequenceNum,
 	}
 
 	leader := ck.leader
@@ -113,7 +119,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		ok := ck.servers[leader].Call("KVServer.PutAppend", args, reply)
 		if ok {
 			if reply.Err == OK {
-				ck.DPrintf("=== %s <%s>:<%s> to leader %d success ===", op, key, value, leader)
+				ck.DPrintf("=== %s <%s>:<%s> to leader %d success, cost %d ms ===",
+					op, key, value, leader, time.Now().Sub(start)/time.Millisecond)
 				ck.leader = leader
 				return
 			}

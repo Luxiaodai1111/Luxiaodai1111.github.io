@@ -58,67 +58,6 @@ type KVServer struct {
 	dupModifyCommand map[int64]int64           // 记录每个客户端最后一条修改成功的序列号，防止重复执行
 }
 
-type DupReqHistorySnap map[int64]string
-
-//func (kv *KVServer) makeDupReqHistorySnap() DupReqHistorySnap {
-//	snap := make(DupReqHistorySnap, 0)
-//	for clientId, info := range kv.dupModifyCommand {
-//		var seqs []int64
-//		for sequenceNum := range info {
-//			seqs = append(seqs, sequenceNum)
-//		}
-//
-//		// 排序
-//		for i := 0; i <= len(seqs)-1; i++ {
-//			for j := i; j <= len(seqs)-1; j++ {
-//				if seqs[i] > seqs[j] {
-//					t := seqs[i]
-//					seqs[i] = seqs[j]
-//					seqs[j] = t
-//				}
-//			}
-//		}
-//
-//		// 将所有序列号压缩(记录和前一条的差值)成一条字符串
-//		snapString := make([]string, len(seqs))
-//		var prev int64
-//		for idx, seq := range seqs {
-//			if idx == 0 {
-//				snapString = append(snapString, strconv.FormatInt(seq, 10))
-//			} else {
-//				snapString = append(snapString, strconv.FormatInt(seq-prev, 10))
-//			}
-//			prev = seq
-//		}
-//
-//		snap[clientId] = strings.Join(snapString, "")
-//	}
-//
-//	return snap
-//}
-//
-//func (kv *KVServer) restoreDupReqHistorySnap(snap DupReqHistorySnap) {
-//	kv.dupModifyCommand = make(map[int64]map[int64]struct{})
-//	for clientId, info := range snap {
-//		if _, ok := kv.dupModifyCommand[clientId]; !ok {
-//			kv.dupModifyCommand[clientId] = make(map[int64]struct{})
-//		}
-//
-//		snapString := strings.Split(info, "")
-//		var prev int64
-//		for idx, value := range snapString {
-//			if idx == 0 {
-//				seq, _ := strconv.ParseInt(value, 10, 64)
-//				prev = seq
-//			} else {
-//				seq, _ := strconv.ParseInt(value, 10, 64)
-//				prev += seq
-//			}
-//			kv.dupModifyCommand[clientId][prev] = struct{}{}
-//		}
-//	}
-//}
-
 func (kv *KVServer) Command(args *CommonArgs, reply *CommonReply) {
 	kv.RLock("Command")
 	if args.Op != OpGet && kv.isDupModifyReq(args.ClientId, args.SequenceNum) {
@@ -250,6 +189,7 @@ func (kv *KVServer) handleApply() {
 				if op.Op != OpGet {
 					kv.updateDupModifyReq(op.ClientId, op.SequenceNum)
 				}
+
 				/*
 				 * 只要有通道存在，说明可能是当前 leader，也可能曾经作为 leader 接收过请求
 				 * 通道可能处于等待消息状态，或者正在返回错误等待销毁，所以不管怎么样，都往通道里返回消息
