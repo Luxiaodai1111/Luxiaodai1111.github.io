@@ -108,7 +108,7 @@ func (kv *ShardKV) applyPullShard(args *PullShardLogArgs, applyLogIndex int) {
 	nowGID = kv.shardState[args.Shard].CurrentCfg.Shards[args.Shard]
 	if nowGID == kv.gid {
 		if prevGID == kv.gid || prevGID == 0 {
-			kv.DPrintf("shard %d' gid not change: cfg num up to %d", args.Shard, kv.shardState[args.Shard].CurrentCfg.Num)
+			kv.DPrintf("shard %d' gid not change, now cfg num is %d", args.Shard, kv.shardState[args.Shard].CurrentCfg.Num)
 			kv.shardState[args.Shard].State = Working
 		} else {
 			// 由 kv.pullShard 异步去拉取分片
@@ -116,11 +116,18 @@ func (kv *ShardKV) applyPullShard(args *PullShardLogArgs, applyLogIndex int) {
 		}
 	} else {
 		if prevGID != kv.gid {
-			kv.DPrintf("shard %d' gid not change: cfg num up to %d", args.Shard, kv.shardState[args.Shard].CurrentCfg.Num)
+			kv.DPrintf("shard %d' gid not change, now cfg num is %d", args.Shard, kv.shardState[args.Shard].CurrentCfg.Num)
 			kv.shardState[args.Shard].State = Working
 		} else {
 			// 等待被拉取分片
 			kv.shardState[args.Shard].State = WaitingToBePulled
+			data := make(map[string]string)
+			for k, v := range kv.db {
+				if key2shard(k) == args.Shard {
+					data[k] = v
+				}
+			}
+			kv.pullData[args.Shard] = data
 		}
 	}
 	if prevGID == kv.gid && nowGID == 0 {
@@ -155,7 +162,7 @@ func (kv *ShardKV) applyUpdateShard(args *UpdateShardLogArgs, applyLogIndex int)
 		for k, v := range args.Data {
 			kv.db[k] = v
 		}
-		kv.DPrintf("update shard %d (cfg %d) data success", args.Shard, args.ShardCfgNum)
+		kv.DPrintf("update shard %d data success, now cfg num is %d", args.Shard, kv.shardState[args.Shard].CurrentCfg.Num)
 	} else {
 		kv.DPrintf("apply duplicate UpdateShardLog: %+v", args)
 	}
@@ -179,12 +186,11 @@ func (kv *ShardKV) applyDeleteShard(args *DeleteShardArgs, applyLogIndex int) {
 	// 防止重复应用同一条修改命令
 	if kv.shardState[args.Shard].State == WaitingToBePulled && kv.shardState[args.Shard].PrevCfg.Num == args.ShardCfgNum {
 		kv.shardState[args.Shard].State = Working
-		for k, _ := range kv.db {
-			if key2shard(k) == args.Shard {
-				delete(kv.db, k)
-			}
+		for k, _ := range kv.pullData[args.Shard] {
+			delete(kv.db, k)
 		}
-		kv.DPrintf("delete shard %d success", args.Shard)
+		kv.pullData[args.Shard] = nil
+		kv.DPrintf("delete shard %d success, now cfg num is %d", args.Shard, kv.shardState[args.Shard].CurrentCfg.Num)
 	} else {
 		kv.DPrintf("apply duplicate DeleteShardLog: %+v", args)
 	}

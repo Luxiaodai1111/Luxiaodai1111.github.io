@@ -210,14 +210,17 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 		return
 	}
 
-	data := make(map[string]string)
-	for k, v := range kv.db {
-		if key2shard(k) == args.Shard {
-			data[k] = v
-		}
-	}
 	reply.Err = OK
-	reply.Data = data
+	if kv.pullData[args.Shard] == nil {
+		data := make(map[string]string)
+		for k, v := range kv.db {
+			if key2shard(k) == args.Shard {
+				data[k] = v
+			}
+		}
+		kv.pullData[args.Shard] = data
+	}
+	reply.Data = kv.pullData[args.Shard]
 
 	kv.DPrintf("=== reply pullShard %d success, cfg num up to %d ===", args.Shard, kv.shardState[args.Shard].CurrentCfg.Num)
 	// 每个分片拉取或被拉取成功都表示这个分片可以开始服务了

@@ -89,26 +89,21 @@ func (ck *Clerk) Get(key string) string {
 
 	ck.DPrintf("=== request %d get key: %s ===", args.SequenceNum, key)
 
+	shard := key2shard(key)
 	for {
-		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
-			retry:
 				var reply CommonReply
-				ok := srv.Call("ShardKV.Get", &args, &reply)
-				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
+				success := srv.Call("ShardKV.Get", &args, &reply)
+				if success && (reply.Err == OK || reply.Err == ErrNoKey) {
 					ck.DPrintf("=== request %d get key: %s success ===", args.SequenceNum, key)
 					return reply.Value
 				}
-				if ok && (reply.Err == ErrWrongGroup) {
+				if success && (reply.Err == ErrWrongGroup) {
 					break
-				}
-				if ok && (reply.Err) == ErrRetry {
-					time.Sleep(10 * time.Millisecond)
-					goto retry
 				}
 				// ... not ok, or ErrWrongLeader
 			}
@@ -136,19 +131,19 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 	ck.DPrintf("=== request %d %s <%s>:<%s> ===", args.SequenceNum, op, key, value)
 
+	shard := key2shard(key)
 	for {
-		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply CommonReply
-				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
-				if ok && reply.Err == OK {
+				success := srv.Call("ShardKV.PutAppend", &args, &reply)
+				if success && reply.Err == OK {
 					ck.DPrintf("=== request %d %s <%s>:<%s> success ===", args.SequenceNum, op, key, value)
 					return
 				}
-				if ok && reply.Err == ErrWrongGroup {
+				if success && reply.Err == ErrWrongGroup {
 					break
 				}
 				// ... not ok, or ErrWrongLeader

@@ -86,9 +86,10 @@ type ShardKV struct {
 	gid            int
 	ctrlers        []*labrpc.ClientEnd
 	mck            *shardctrler.Clerk
-	configs        []shardctrler.Config // 所有的配置信息
-	shardState     map[int]*ShardState  // 分片的配置状态
-	updateConfigCh chan struct{}        // 用于通知更新配置
+	configs        []shardctrler.Config                   // 所有的配置信息
+	shardState     map[int]*ShardState                    // 分片的配置状态
+	updateConfigCh chan struct{}                          // 用于通知更新配置
+	pullData       [shardctrler.NShards]map[string]string // 等待被拉取时将数据保存在此，而不是每次遍历数据库去查找
 
 	maxraftstate int // snapshot if log grows this big
 

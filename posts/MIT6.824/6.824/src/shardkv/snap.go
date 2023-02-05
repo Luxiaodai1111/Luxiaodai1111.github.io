@@ -18,8 +18,14 @@ type ShardStateSimple struct {
 func (kv *ShardKV) encodeShardState() ShardStateSnap {
 	snap := make(ShardStateSnap)
 	for shard, info := range kv.shardState {
+		state := info.State
+		if info.State == Pulling {
+			state = PreparePull
+		} else if info.State == PrepareReConfig {
+			state = Working
+		}
 		snap[shard] = &ShardStateSimple{
-			State:         info.State,
+			State:         state,
 			PrevCfgNum:    info.PrevCfg.Num,
 			CurrentCfgNum: info.CurrentCfg.Num,
 		}
