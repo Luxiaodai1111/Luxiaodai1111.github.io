@@ -97,7 +97,7 @@ type ShardKV struct {
 	db               map[string]string         // 内存数据库
 	notifyChans      map[int]chan *CommonReply // 监听请求 apply
 	notifyChansLock  sync.Mutex
-	dupModifyCommand map[int64]int64 // 记录已经执行的修改命令，防止重复执行
+	dupModifyCommand [shardctrler.NShards]map[int64]int64 // 记录每个客户端每个分片最大已执行修改命令的序号
 }
 
 func (kv *ShardKV) checkShard(key string, reply *CommonReply) bool {
@@ -287,9 +287,10 @@ func (kv *ShardKV) pullShard() {
 								kv.DPrintf("=== pullShard %d (cfg %d) from %d success ===", shard, prevCfg.Num, dstGID)
 								// 写入拉取成功日志
 								kv.WriteLog(UpdateShardLog, UpdateShardLogArgs{
-									Shard:       shard,
-									ShardCfgNum: prevCfg.Num,
-									Data:        reply.Data,
+									Shard:            shard,
+									ShardCfgNum:      prevCfg.Num,
+									Data:             reply.Data,
+									DupModifyCommand: reply.DupModifyCommand,
 								})
 								return
 							}
@@ -385,13 +386,13 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 			PrevCfg:    &kv.configs[0],
 			CurrentCfg: &kv.configs[0],
 		}
+		kv.dupModifyCommand[i] = make(map[int64]int64)
 	}
 	kv.updateConfigCh = make(chan struct{})
 
 	kv.lastApplyIndex = 0
 	kv.db = make(map[string]string)
 	kv.notifyChans = make(map[int]chan *CommonReply)
-	kv.dupModifyCommand = make(map[int64]int64)
 
 	go kv.updateConfig()       // 负责从 shardctrler 拉取配置，写入配置更新日志
 	go kv.updatePullShardLog() // 负责写入配置更改日志

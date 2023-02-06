@@ -9,6 +9,7 @@ func (kv *ShardKV) applyCommand(command *CommandArgs, applyLogIndex int) {
 	var value string
 	var ok bool
 
+	shard := key2shard(command.Key)
 	kv.Lock("applyCommand")
 	// 检查当前是否服务分片
 	if kv.checkShard(command.Key, reply) {
@@ -16,7 +17,7 @@ func (kv *ShardKV) applyCommand(command *CommandArgs, applyLogIndex int) {
 	}
 
 	// 检查重复请求
-	if command.Op != OpGet && kv.isDupModifyReq(command.ClientId, command.SequenceNum) {
+	if command.Op != OpGet && kv.isDupModifyReq(shard, command.ClientId, command.SequenceNum) {
 		kv.DPrintf("apply duplicate command: %+v", command)
 		kv.Unlock("applyCommand")
 		return
@@ -40,7 +41,7 @@ func (kv *ShardKV) applyCommand(command *CommandArgs, applyLogIndex int) {
 		kv.DPrintf("update <%s>:<%s>", command.Key, kv.db[command.Key])
 	}
 	if command.Op != OpGet {
-		kv.updateDupModifyReq(command.ClientId, command.SequenceNum)
+		kv.updateDupModifyReq(shard, command.ClientId, command.SequenceNum)
 	}
 
 replyCommand:
@@ -162,6 +163,10 @@ func (kv *ShardKV) applyUpdateShard(args *UpdateShardLogArgs, applyLogIndex int)
 		for k, v := range args.Data {
 			kv.db[k] = v
 		}
+
+		for clientId, sequenceNum := range args.DupModifyCommand {
+			kv.updateDupModifyReq(args.Shard, clientId, sequenceNum)
+		}
 		kv.DPrintf("update shard %d data success, now cfg num is %d", args.Shard, kv.shardState[args.Shard].CurrentCfg.Num)
 	} else {
 		kv.DPrintf("apply duplicate UpdateShardLog: %+v", args)
@@ -189,7 +194,6 @@ func (kv *ShardKV) applyDeleteShard(args *DeleteShardArgs, applyLogIndex int) {
 		for k, _ := range kv.pullData[args.Shard] {
 			delete(kv.db, k)
 		}
-		kv.pullData[args.Shard] = nil
 		kv.DPrintf("delete shard %d success, now cfg num is %d", args.Shard, kv.shardState[args.Shard].CurrentCfg.Num)
 	} else {
 		kv.DPrintf("apply duplicate DeleteShardLog: %+v", args)

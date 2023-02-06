@@ -28,7 +28,8 @@ const (
 	OpAppend = "Append"
 	OpGet    = "Get"
 
-	ExecuteTimeout = time.Millisecond * 500
+	ExecuteTimeout  = time.Millisecond * 500
+	WriteLogTimeout = time.Second * 3
 
 	// 分片状态
 	Working           = "Working"
@@ -56,14 +57,16 @@ type DeleteShardArgs struct {
 }
 
 type PullShardReply struct {
-	Err  Err
-	Data map[string]string
+	Err              Err
+	Data             map[string]string
+	DupModifyCommand map[int64]int64
 }
 
 type UpdateShardLogArgs struct {
-	Shard       int // 更改的分片
-	ShardCfgNum int
-	Data        map[string]string
+	Shard            int // 更改的分片
+	ShardCfgNum      int
+	Data             map[string]string
+	DupModifyCommand map[int64]int64
 }
 
 type PullShardLogArgs struct {

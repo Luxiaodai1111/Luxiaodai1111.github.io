@@ -14,7 +14,7 @@ func (kv *ShardKV) Command(args *CommandArgs, reply *CommonReply) {
 	kv.RUnlock("checkShard")
 
 	kv.RLock("Command")
-	if args.Op != OpGet && kv.isDupModifyReq(args.ClientId, args.SequenceNum) {
+	if args.Op != OpGet && kv.isDupModifyReq(key2shard(args.Key), args.ClientId, args.SequenceNum) {
 		kv.DPrintf("duplicate command request: %+v, reply history response", args)
 		reply.Err = OK
 		kv.RUnlock("Command")
@@ -65,7 +65,7 @@ func (kv *ShardKV) Command(args *CommandArgs, reply *CommonReply) {
 			reply.Err, reply.Value = result.Err, result.Value
 		}
 	case <-time.After(ExecuteTimeout):
-		kv.DPrintf("wait apply log %d time out", index)
+		kv.DPrintf("wait command apply log %d time out", index)
 		reply.Err = ErrTimeout
 	}
 
@@ -83,7 +83,7 @@ func (kv *ShardKV) PutAppend(args *CommandArgs, reply *CommonReply) {
 	kv.Command(args, reply)
 }
 
-func (kv *ShardKV) replyCommon(index, term int, isLeader bool, reply *CommonReply) {
+func (kv *ShardKV) replyCommon(LogType string, index, term int, isLeader bool, reply *CommonReply) {
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
@@ -110,8 +110,8 @@ func (kv *ShardKV) replyCommon(index, term int, isLeader bool, reply *CommonRepl
 		} else {
 			reply.Err, reply.Value = result.Err, result.Value
 		}
-	case <-time.After(ExecuteTimeout):
-		kv.DPrintf("wait apply log %d time out", index)
+	case <-time.After(WriteLogTimeout):
+		kv.DPrintf("wait %s apply log %d time out", LogType, index)
 		reply.Err = ErrTimeout
 	}
 
@@ -136,7 +136,7 @@ func (kv *ShardKV) ReConfigLog(args *ReConfigLogArgs, reply *CommonReply) {
 		ReConfigLogArgs: args,
 	})
 
-	kv.replyCommon(index, term, isLeader, reply)
+	kv.replyCommon(ReConfigLog, index, term, isLeader, reply)
 }
 
 func (kv *ShardKV) PullShardLog(args *PullShardLogArgs, reply *CommonReply) {
@@ -154,7 +154,7 @@ func (kv *ShardKV) PullShardLog(args *PullShardLogArgs, reply *CommonReply) {
 		PullShardLogArgs: args,
 	})
 
-	kv.replyCommon(index, term, isLeader, reply)
+	kv.replyCommon(PullShardLog, index, term, isLeader, reply)
 }
 
 func (kv *ShardKV) UpdateShardLog(args *UpdateShardLogArgs, reply *CommonReply) {
@@ -165,7 +165,7 @@ func (kv *ShardKV) UpdateShardLog(args *UpdateShardLogArgs, reply *CommonReply) 
 		UpdateShardLogArgs: args,
 	})
 
-	kv.replyCommon(index, term, isLeader, reply)
+	kv.replyCommon(UpdateShardLog, index, term, isLeader, reply)
 }
 
 func (kv *ShardKV) DeleteShardLog(args *DeleteShardArgs, reply *CommonReply) {
@@ -176,7 +176,7 @@ func (kv *ShardKV) DeleteShardLog(args *DeleteShardArgs, reply *CommonReply) {
 		DeleteShardArgs: args,
 	})
 
-	kv.replyCommon(index, term, isLeader, reply)
+	kv.replyCommon(DeleteShardLog, index, term, isLeader, reply)
 }
 
 func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
@@ -211,18 +211,10 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 	}
 
 	reply.Err = OK
-	if kv.pullData[args.Shard] == nil {
-		data := make(map[string]string)
-		for k, v := range kv.db {
-			if key2shard(k) == args.Shard {
-				data[k] = v
-			}
-		}
-		kv.pullData[args.Shard] = data
-	}
 	reply.Data = kv.pullData[args.Shard]
+	reply.DupModifyCommand = kv.dupModifyCommand[args.Shard]
 
-	kv.DPrintf("=== reply pullShard %d success, cfg num up to %d ===", args.Shard, kv.shardState[args.Shard].CurrentCfg.Num)
+	kv.DPrintf("=== reply %+v pullShard %d success, cfg num up to %d ===", reply, args.Shard, kv.shardState[args.Shard].CurrentCfg.Num)
 	// 每个分片拉取或被拉取成功都表示这个分片可以开始服务了
 	// 写入删除分片日志，同步 Working 状态
 	go kv.WriteLog(DeleteShardLog, DeleteShardArgs{
