@@ -1,6 +1,7 @@
 package shardkv
 
 import (
+	"context"
 	"fmt"
 )
 
@@ -211,7 +212,7 @@ func (kv *ShardKV) applyDeleteShard(args *DeleteShardArgs, applyLogIndex int) {
 	}
 }
 
-func (kv *ShardKV) handleApply() {
+func (kv *ShardKV) handleApply(ctx context.Context) {
 	for kv.killed() == false {
 		select {
 		case applyLog := <-kv.applyCh:
@@ -262,7 +263,8 @@ func (kv *ShardKV) handleApply() {
 					kv.makeSnap(applyLog.CommandIndex)
 				}
 			} else if applyLog.SnapshotValid {
-				kv.DPrintf("======== recieve apply snap: %d ========", applyLog.SnapshotIndex)
+				kv.DPrintf("======== recieve apply snap: %d, lastApplyIndex %d ========",
+					applyLog.SnapshotIndex, kv.lastApplyIndex)
 				if applyLog.SnapshotIndex <= kv.lastApplyIndex {
 					kv.DPrintf("***** snap index %d is older than lastApplyIndex %d *****",
 						applyLog.SnapshotIndex, kv.lastApplyIndex)
@@ -272,6 +274,8 @@ func (kv *ShardKV) handleApply() {
 			} else {
 				panic(fmt.Sprintf("[panic] unexpected applyLog %+v", applyLog))
 			}
+		case <-ctx.Done():
+			return
 		default:
 			continue
 		}

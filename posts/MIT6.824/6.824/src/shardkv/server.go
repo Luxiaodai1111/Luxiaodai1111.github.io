@@ -3,6 +3,7 @@ package shardkv
 import (
 	"6.824/labrpc"
 	"6.824/shardctrler"
+	"context"
 	"fmt"
 	"log"
 	"sync/atomic"
@@ -31,6 +32,8 @@ func (kv *ShardKV) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
 	// Your code here, if desired.
+	kv.DPrintf("Kill")
+	kv.cancel()
 }
 
 func (kv *ShardKV) killed() bool {
@@ -74,8 +77,9 @@ type ShardState struct {
 }
 
 type ShardKV struct {
-	mu   sync.RWMutex
-	dead int32 // set by Kill()
+	mu     sync.RWMutex
+	dead   int32 // set by Kill()
+	cancel context.CancelFunc
 
 	me      int
 	applyCh chan raft.ApplyMsg
@@ -187,12 +191,14 @@ logTypePanic:
 	panic(fmt.Sprintf("[panic] error %s args %+v", logType, args))
 }
 
-func (kv *ShardKV) updateConfig() {
+func (kv *ShardKV) updateConfig(ctx context.Context) {
 	ticker := time.NewTicker(time.Millisecond * 100)
 	for kv.killed() == false {
 		select {
 		case <-kv.updateConfigCh:
 		case <-ticker.C:
+		case <-ctx.Done():
+			return
 		}
 
 		_, isleader := kv.rf.GetState()
@@ -221,11 +227,13 @@ func (kv *ShardKV) updateConfig() {
 	}
 }
 
-func (kv *ShardKV) updatePullShardLog() {
+func (kv *ShardKV) updatePullShardLog(ctx context.Context) {
 	ticker := time.NewTicker(time.Millisecond * 100)
 	for kv.killed() == false {
 		select {
 		case <-ticker.C:
+		case <-ctx.Done():
+			return
 		}
 
 		_, isleader := kv.rf.GetState()
@@ -250,11 +258,13 @@ func (kv *ShardKV) updatePullShardLog() {
 	}
 }
 
-func (kv *ShardKV) pullShard() {
+func (kv *ShardKV) pullShard(ctx context.Context) {
 	ticker := time.NewTicker(time.Millisecond * 100)
 	for kv.killed() == false {
 		select {
 		case <-ticker.C:
+		case <-ctx.Done():
+			return
 		}
 
 		_, isleader := kv.rf.GetState()
@@ -307,11 +317,13 @@ func (kv *ShardKV) pullShard() {
 	}
 }
 
-func (kv *ShardKV) noOpLog() {
+func (kv *ShardKV) noOpLog(ctx context.Context) {
 	ticker := time.NewTicker(time.Millisecond * 100)
 	for kv.killed() == false {
 		select {
 		case <-ticker.C:
+		case <-ctx.Done():
+			return
 		}
 
 		_, isleader := kv.rf.GetState()
@@ -394,11 +406,13 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.db = make(map[string]string)
 	kv.notifyChans = make(map[int]chan *CommonReply)
 
-	go kv.updateConfig()       // 负责从 shardctrler 拉取配置，写入配置更新日志
-	go kv.updatePullShardLog() // 负责写入配置更改日志
-	go kv.pullShard()          // 检测是否需要去拉取分片
-	go kv.noOpLog()            // 定期检查是否需要提交空日志
-	go kv.handleApply()        // 处理 raft apply
+	ctx, cancel := context.WithCancel(context.Background())
+	kv.cancel = cancel
+	go kv.updateConfig(ctx)       // 负责从 shardctrler 拉取配置，写入配置更新日志
+	go kv.updatePullShardLog(ctx) // 负责写入配置更改日志
+	go kv.pullShard(ctx)          // 检测是否需要去拉取分片
+	go kv.noOpLog(ctx)            // 定期检查是否需要提交空日志
+	go kv.handleApply(ctx)        // 处理 raft apply
 
 	return kv
 }
