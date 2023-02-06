@@ -53,7 +53,7 @@ func (kv *ShardKV) makeSnap(applyLogIndex int) {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	if e.Encode(kv.db) != nil || e.Encode(kv.configs) != nil ||
-		e.Encode(shardStateSnap) != nil || e.Encode(kv.dupModifyCommand) != nil {
+		e.Encode(shardStateSnap) != nil || e.Encode(kv.dupModifyCommand) != nil || e.Encode(kv.pullData) != nil {
 		panic(fmt.Sprintf("[panic] encode snap error"))
 	}
 	data := w.Bytes()
@@ -67,7 +67,7 @@ func (kv *ShardKV) restoreFromSnap(snapshot []byte, snapshotIndex int) {
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
 	if d.Decode(&kv.db) != nil || d.Decode(&kv.configs) != nil ||
-		d.Decode(&shardStateSnap) != nil || d.Decode(&kv.dupModifyCommand) != nil {
+		d.Decode(&shardStateSnap) != nil || d.Decode(&kv.dupModifyCommand) != nil || d.Decode(&kv.pullData) != nil {
 		panic(fmt.Sprintf("[panic] decode snap error"))
 	}
 	kv.decodeShardState(shardStateSnap)

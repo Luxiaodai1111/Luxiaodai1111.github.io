@@ -164,6 +164,7 @@ func (kv *ShardKV) applyUpdateShard(args *UpdateShardLogArgs, applyLogIndex int)
 		for k, v := range args.Data {
 			kv.db[k] = v
 		}
+		kv.pullData[args.Shard] = make(map[string]string)
 
 		for clientId, sequenceNum := range args.DupModifyCommand {
 			kv.updateDupModifyReq(args.Shard, clientId, sequenceNum)
