@@ -123,14 +123,19 @@ func (kv *KVServer) PutAppend(args *CommonArgs, reply *CommonReply) {
 }
 
 func (kv *KVServer) updateDupModifyReq(clientId, sequenceNum int64) {
+	if _, ok := kv.dupModifyCommand[clientId]; !ok {
+		kv.dupModifyCommand[clientId] = sequenceNum
+	}
 	if sequenceNum > kv.dupModifyCommand[clientId] {
 		kv.dupModifyCommand[clientId] = sequenceNum
 	}
 }
 
 func (kv *KVServer) isDupModifyReq(clientId, sequenceNum int64) bool {
-	if sequenceNum <= kv.dupModifyCommand[clientId] {
-		return true
+	if _, ok := kv.dupModifyCommand[clientId]; ok {
+		if sequenceNum <= kv.dupModifyCommand[clientId] {
+			return true
+		}
 	}
 
 	return false

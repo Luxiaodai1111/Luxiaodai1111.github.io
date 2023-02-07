@@ -499,6 +499,7 @@ func (rf *Raft) replicate(peer int) {
 }
 
 func (rf *Raft) broadcast() {
+	rf.lastSend = time.Now()
 	rf.plug = 0
 	for peer := range rf.peers {
 		if peer == rf.me {
@@ -531,6 +532,7 @@ type Raft struct {
 
 	electionTimeout time.Time   // go timer reset bugfix
 	electionTimer   *time.Timer // 选举计时器
+	lastSend        time.Time   // 上次发送日志的时间
 
 	applyCh           chan ApplyMsg
 	internalApplyList []ApplyMsg // 内部 apply 队列
@@ -1000,7 +1002,10 @@ func (rf *Raft) heartbeat() {
 		rf.Lock("heartbeatTimer")
 		if rf.role == Leader {
 			// Leader 定期发送心跳
-			rf.broadcast()
+			if time.Now().After(rf.lastSend.Add(rf.HeartbeatTimeout())) {
+				// 近期有发送日志就不用再发心跳了
+				rf.broadcast()
+			}
 			rf.updateCommitIndex()
 			rf.ResetElectionTimeout()
 		}
