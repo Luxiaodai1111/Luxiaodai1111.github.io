@@ -13,7 +13,7 @@ import "6.824/raft"
 import "sync"
 import "6.824/labgob"
 
-const Debug = true
+const Debug = false
 
 func (kv *ShardKV) DPrintf(format string, a ...interface{}) {
 	if Debug {
