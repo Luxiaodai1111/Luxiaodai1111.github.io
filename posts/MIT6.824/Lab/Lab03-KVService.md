@@ -258,13 +258,16 @@ type Clerk struct {
 
 ```go
 func (ck *Clerk) Get(key string) string {
+	ck.maxSequenceNum += 1
+
 	ck.DPrintf("=== request get key: %s ===", key)
+	start := time.Now()
 
 	args := &CommonArgs{
 		Key:         key,
 		Op:          OpGet,
 		ClientId:    ck.clientId,
-		SequenceNum: atomic.AddInt64(&ck.maxSequenceNum, 1),
+		SequenceNum: ck.maxSequenceNum,
 	}
 
 	leader := ck.leader
@@ -273,7 +276,8 @@ func (ck *Clerk) Get(key string) string {
 		ok := ck.servers[leader].Call("KVServer.Get", args, reply)
 		if ok {
 			if reply.Err == OK {
-				ck.DPrintf("=== get <%s>:<%s> from leader %d success ===", key, reply.Value, leader)
+				ck.DPrintf("=== get <%s>:<%s> from leader %d success, cost %d ms ===",
+					key, reply.Value, leader, time.Now().Sub(start)/time.Millisecond)
 				ck.leader = leader
 				return reply.Value
 			} else if reply.Err == ErrNoKey {
@@ -292,7 +296,13 @@ func (ck *Clerk) Get(key string) string {
 }
 ```
 
-服务器端稍微复杂一点，首先我们看结构体定义，我们使用 map 来当内存数据库，也就是状态机，另外由于请求需要 raft 复制到半数节点，所以请求需要通道来通知可以返回，另外请求被提交不代表能正确回复客户端，假如请求迟迟没有回复，客户端重试将请求发给了新的 leader，那么日志就会有两个同样的命令，但是客户端期待的是只执行一遍，所以我们需要在 apply 的时候根据客户端标识和请求序号对请求去重
+服务器端稍微复杂一点，首先我们看结构体定义，我们使用 map 来当内存数据库，也就是状态机
+
+另外由于请求需要 raft 复制到半数节点才能算提交成功，所以请求回复需要通道来通知可以返回，另外请求被提交不代表能正确回复客户端，假如请求迟迟没有回复，客户端重试将请求发给了新的 leader，那么就会存在两条日志保存同样的命令，但是客户端期待的是只执行一遍，所以我们需要在 apply 的时候根据客户端标识和请求序号对请求去重
+
+即使请求是幂等的，也不能重复执行，比如 Put 1，Get，Put 2，对于赋值操作总是幂等的，但是如果 Put 2 之后又执行 Put 1，那么对于客户端来说就是不可理解的情况
+
+另外去重只需要保留执行成功的最大序列号即可，因为客户端只有在接收返回成功，序列号才会增长，如果 apply 了一条日志，那么在它序列号之前的操作一定是已经成功了的，也就是重复的
 
 ```go
 type KVServer struct {
@@ -305,22 +315,24 @@ type KVServer struct {
 	maxraftstate   int // snapshot if log grows this big
 	lastApplyIndex int
 
-	db            map[string]string            // 内存数据库
-	notifyChans   map[int]chan *CommonReply    // 监听请求 apply
-	dupReqHistory map[int64]map[int64]struct{} // 记录已经执行的修改命令，防止重复执行
+	db               map[string]string         // 内存数据库
+	notifyChans      map[int]chan *CommonReply // 监听请求 apply
+	dupModifyCommand map[int64]int64           // 记录每个客户端最后一条修改成功的序列号，防止重复执行
 }
 ```
 
-首先收到请求后，建立通道，然后等待 raft apply，对于返回的请求，如果不是 leader 了就不用返回了，如果任期和 Start 时不一致了，此时也不返回，因为 index 可能会错乱，从而错乱回复。另外设置了超时，比如分区情况下，可能迟迟不会 apply，此时不能阻塞客户端请求。
+收到请求后，建立通道，然后等待 raft apply，对于返回的请求，如果不是 leader 了就不用返回了，如果任期和 Start 时不一致了，此时也不返回，因为 index 可能会错乱，从而错乱回复。另外设置了等待 apply 超时，比如分区情况下，可能迟迟不会 apply，此时不能阻塞客户端请求。
 
 ```go
 func (kv *KVServer) Command(args *CommonArgs, reply *CommonReply) {
-	// 修改请求重复
-	if args.Op != OpGet && kv.isDuplicateRequest(args.ClientId, args.SequenceNum) {
-		kv.DPrintf("found duplicate request: %+v, reply history response", args)
+	kv.RLock("Command")
+	if args.Op != OpGet && kv.isDupModifyReq(args.ClientId, args.SequenceNum) {
+		kv.DPrintf("duplicate command request: %+v, reply history response", args)
 		reply.Err = OK
+		kv.RUnlock("Command")
 		return
 	}
+	kv.RUnlock("Command")
 
 	/*
 	 * 要使用 term 和 index 来代表一条日志
@@ -375,7 +387,7 @@ lastApplyIndex 只是我防御性编程，已经 apply 过就不要重复 apply 
 
 更改状态机没什么好说的，更改完成后就可以通知请求回复了。注意的是，此时可能已经切换 leader 了，这个时候通道可能还存在，甚至本节点的日志会被别人覆盖，从而导致 index 错乱，这个时候如果回复，那么会有什么结果就不得而知了，所以通道那头需要判断当前是否为主，任期是否改变等等。
 
-最后就是检查是否需要大快照了，需要注意的是，重复请求哈希表也需要快照，因为 apply 快照实际上相当于跳过了一些日志 apply，如果没有同步更新重复哈希表，那么就可能造成请求重复执行（比如客户端重新发送了同样的请求到这个节点，然后添加到了日志并执行）。
+最后就是检查是否需要快照了，需要注意的是，重复请求哈希表也需要快照，因为 apply 快照实际上相当于跳过了一些日志 apply，如果没有同步更新重复哈希表，那么就可能造成请求重复执行（比如客户端重新发送了同样的请求到这个节点，然后添加到了日志并执行）。
 
 对于跳过的那些请求，如果是修改请求可以直接返回 OK，如果是读请求，直接让客户端重试就好了。
 
@@ -387,14 +399,13 @@ func (kv *KVServer) handleApply() {
 			if applyLog.CommandValid {
 				op, ok := applyLog.Command.(Op)
 				if !ok {
-					kv.DPrintf("[panic] recieved apply log's command error")
-					kv.Kill()
-					return
+					panic(fmt.Sprintf("[panic] recieved apply log's command error"))
 				}
 
 				reply := &CommonReply{
 					Err: OK,
 				}
+				var value string
 
 				if applyLog.CommandIndex <= kv.lastApplyIndex {
 					// 比如 raft 重启了，就要重新 apply
@@ -405,14 +416,15 @@ func (kv *KVServer) handleApply() {
 				kv.lastApplyIndex = applyLog.CommandIndex
 
 				kv.DPrintf("recieve apply log: %d, op info: %+v", applyLog.CommandIndex, op)
-				// 防止重复应用同一条修改命令
-				if op.Op != OpGet && kv.isDuplicateRequest(op.ClientId, op.SequenceNum) {
-					kv.DPrintf("found duplicate request: %+v", op)
+				// 检查重复请求
+				if op.Op != OpGet && kv.isDupModifyReq(op.ClientId, op.SequenceNum) {
+					kv.DPrintf("apply duplicate command: %+v", op)
+					// 同一客户端某个序号请求没有返回成功就不会有大于它的序号请求产生，所以重复的请求没有必要回复
 					continue
 				}
 
 				// 更新状态机
-				value, ok := kv.db[op.Key]
+				value, ok = kv.db[op.Key]
 				if op.Op == OpGet {
 					if ok {
 						reply.Value = value
@@ -431,8 +443,9 @@ func (kv *KVServer) handleApply() {
 
 				kv.Lock("replyCommand")
 				if op.Op != OpGet {
-					kv.updateDupReqHistory(op.ClientId, op.SequenceNum)
+					kv.updateDupModifyReq(op.ClientId, op.SequenceNum)
 				}
+
 				/*
 				 * 只要有通道存在，说明可能是当前 leader，也可能曾经作为 leader 接收过请求
 				 * 通道可能处于等待消息状态，或者正在返回错误等待销毁，所以不管怎么样，都往通道里返回消息
@@ -453,12 +466,9 @@ func (kv *KVServer) handleApply() {
 					w := new(bytes.Buffer)
 					e := labgob.NewEncoder(w)
 					kv.Lock("snap")
-					dupReqHistorySnap := kv.makeDupReqHistorySnap()
-					if e.Encode(kv.db) != nil || e.Encode(dupReqHistorySnap) != nil {
-						kv.DPrintf("[panic] encode snap error")
+					if e.Encode(kv.db) != nil || e.Encode(kv.dupModifyCommand) != nil {
 						kv.Unlock("snap")
-						kv.Kill()
-						return
+						panic(fmt.Sprintf("[panic] encode snap error"))
 					}
 					kv.Unlock("snap")
 					data := w.Bytes()
@@ -477,18 +487,14 @@ func (kv *KVServer) handleApply() {
 				d := labgob.NewDecoder(r)
 				kv.Lock("applySnap")
 				kv.db = make(map[string]string)
-				var dupReqHistorySnap DupReqHistorySnap
-				if d.Decode(&kv.db) != nil || d.Decode(&dupReqHistorySnap) != nil {
-					kv.DPrintf("[panic] decode snap error")
+				if d.Decode(&kv.db) != nil || d.Decode(&kv.dupModifyCommand) != nil {
 					kv.Unlock("applySnap")
-					kv.Kill()
-					return
+					panic(fmt.Sprintf("[panic] decode snap error"))
 				}
-				kv.restoreDupReqHistorySnap(dupReqHistorySnap)
 				kv.Unlock("applySnap")
 
 				// lastApplyIndex 到快照之间的修改请求一定会包含在查重哈希表里
-				// 对于读只需要让客户端重新尝试即可
+				// 对于读只需要让客户端重新尝试即可满足线性一致
 				kv.Lock("replyCommand")
 				reply := &CommonReply{
 					Err: ApplySnap,
@@ -501,12 +507,10 @@ func (kv *KVServer) handleApply() {
 						}
 					}
 				}
-				kv.Unlock("replyCommand")
 				kv.lastApplyIndex = applyLog.SnapshotIndex
+				kv.Unlock("replyCommand")
 			} else {
-				kv.DPrintf(fmt.Sprintf("[panic] unexpected applyLog %v", applyLog))
-				kv.Kill()
-				return
+				panic(fmt.Sprintf("[panic] unexpected applyLog %+v", applyLog))
 			}
 		default:
 			continue
@@ -523,7 +527,7 @@ func (kv *KVServer) handleApply() {
 
 另外 apply 索引排序也优化了下，不过测试下来好像没啥大影响；另外这里其实可以不用排序，交给上层去处理也是没问题的，我只是觉得排序了对上层逻辑更清晰简单一些。
 
-3A 的速度测试是一个请求一个请求的发，收到回复再发下一个，对于之前的设计，满足阈值的条目数会立刻发送，否则等待心跳发送日志，之前心跳设置的 100 ms，那么相当于一秒就复制 10 条日志，满足不了测试要求，因此调整阈值为 1 表示收到请求立即复制来满足测试要求。
+3A 的速度测试是一个请求一个请求的发，收到回复再发下一个，对于之前的设计，满足阈值的条目数会立刻发送，否则等待心跳发送日志，之前心跳设置的 100 ms，那么相当于一秒就复制 10 条日志，满足不了测试要求，因此调整阈值为 1 表示收到请求立即复制来满足测试要求（虽然最后还是差了点……）。
 
 
 
@@ -539,71 +543,78 @@ func (kv *KVServer) handleApply() {
 
 由于记录快照不仅要记录数据库，还需要记录重复请求的哈希索引，而哈希索引是随着请求越来越多的，怎么办呢？
 
-一是读请求不用过滤重复，因为它不影响状态；
+最开始我是把 put 请求序列号压缩一下，先排序，然后只记录最小值和他们之间的差值，并转成一条字符串保存也可以满足测试；后来想明白不需要保存每条请求，只需要记录每个客户端最后一条执行成功的序号就行了。
 
-二是在封装快照时，可以把序列号压缩一下，我采用的方法是先排序，然后只记录最小值和他们之间的差值，并转成一条字符串保存
 
-不知道我方向有没有走偏……也许实验是让我思考一种正确保存快照的办法，而我在这搞些邪门歪道哈哈哈
+
+## 测试
+
+遗憾的是速度测试没有通过，目前没有思路去优化，就先放一放吧……
 
 ```go
-func (kv *KVServer) makeDupReqHistorySnap() DupReqHistorySnap {
-	snap := make(DupReqHistorySnap, 0)
-	for clientId, info := range kv.dupReqHistory {
-		var seqs []int64
-		for sequenceNum := range info {
-			seqs = append(seqs, sequenceNum)
-		}
+root@root:~/lz/6.824/src/kvraft# go test
+Test: one client (3A) ...
+  ... Passed --  15.4  5  6185  228
 
-		// 排序
-		for i := 0; i <= len(seqs)-1; i++ {
-			for j := i; j <= len(seqs)-1; j++ {
-				if seqs[i] > seqs[j] {
-					t := seqs[i]
-					seqs[i] = seqs[j]
-					seqs[j] = t
-				}
-			}
-		}
+// 速度测试失败
+Test: ops complete fast enough (3A) ...
+--- FAIL: TestSpeed3A (37.54s)
+    test_test.go:419: Operations completed too slowly 36.927183ms/op > 33.333333ms/op
 
-		// 将所有序列号压缩(记录和前一条的差值)成一条字符串
-		snapString := make([]string, len(seqs))
-		var prev int64
-		for idx, seq := range seqs {
-			if idx == 0 {
-				snapString = append(snapString, strconv.FormatInt(seq, 10))
-			} else {
-				snapString = append(snapString, strconv.FormatInt(seq-prev, 10))
-			}
-			prev = seq
-		}
+Test: many clients (3A) ...
+  ... Passed --  16.6  5 12158  823
+Test: unreliable net, many clients (3A) ...
+  ... Passed --  18.1  5  2853  415
+Test: concurrent append to same key, unreliable (3A) ...
+  ... Passed --   2.4  3   235   52
+Test: progress in majority (3A) ...
+  ... Passed --   0.7  5    67    2
+Test: no progress in minority (3A) ...
+  ... Passed --   1.2  5   117    3
+Test: completion after heal (3A) ...
+  ... Passed --   1.1  5    56    3
+Test: partitions, one client (3A) ...
+  ... Passed --  22.7  5 17021  172
+Test: partitions, many clients (3A) ...
+  ... Passed --  23.9  5 32357  578
+Test: restarts, one client (3A) ...
+  ... Passed --  22.1  5 15385  221
+Test: restarts, many clients (3A) ...
+  ... Passed --  25.7  5 29306  766
+Test: unreliable net, restarts, many clients (3A) ...
+  ... Passed --  26.4  5  3856  438
+Test: restarts, partitions, many clients (3A) ...
+  ... Passed --  32.3  5 65446  554
+Test: unreliable net, restarts, partitions, many clients (3A) ...
+  ... Passed --  32.9  5  3718  203
+Test: unreliable net, restarts, partitions, random keys, many clients (3A) ...
+  ... Passed --  46.0  7  8694  543
+Test: InstallSnapshot RPC (3B) ...
+  ... Passed --   5.0  3  5965   63
+Test: snapshot size is reasonable (3B) ...
+  ... Passed --  27.9  3  7630  800
 
-		snap[clientId] = strings.Join(snapString, "")
-	}
+// 速度测试失败
+Test: ops complete fast enough (3B) ...
+--- FAIL: TestSpeed3B (36.48s)
+    test_test.go:419: Operations completed too slowly 35.474857ms/op > 33.333333ms/op
 
-	return snap
-}
+Test: restarts, snapshots, one client (3B) ...
+  ... Passed --  20.7  5 15758  237
+Test: restarts, snapshots, many clients (3B) ...
+  ... Passed --  25.3  5 41315 1986
+Test: unreliable net, snapshots, many clients (3B) ...
+  ... Passed --  17.5  5  2923  447
+Test: unreliable net, restarts, snapshots, many clients (3B) ...
+  ... Passed --  23.4  5  3577  422
+Test: unreliable net, restarts, partitions, snapshots, many clients (3B) ...
+  ... Passed --  30.1  5  3059  208
+Test: unreliable net, restarts, partitions, snapshots, random keys, many clients (3B) ...
+  ... Passed --  40.6  7  8745  523
+FAIL
+exit status 1
+FAIL	6.824/kvraft	552.964s
 
-func (kv *KVServer) restoreDupReqHistorySnap(snap DupReqHistorySnap) {
-	kv.dupReqHistory = make(map[int64]map[int64]struct{})
-	for clientId, info := range snap {
-		if _, ok := kv.dupReqHistory[clientId]; !ok {
-			kv.dupReqHistory[clientId] = make(map[int64]struct{})
-		}
-
-		snapString := strings.Split(info, "")
-		var prev int64
-		for idx, value := range snapString {
-			if idx == 0 {
-				seq, _ := strconv.ParseInt(value, 10, 64)
-				prev = seq
-			} else {
-				seq, _ := strconv.ParseInt(value, 10, 64)
-				prev += seq
-			}
-			kv.dupReqHistory[clientId][prev] = struct{}{}
-		}
-	}
-}
 ```
 
 

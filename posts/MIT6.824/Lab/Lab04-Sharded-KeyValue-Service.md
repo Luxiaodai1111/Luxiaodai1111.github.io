@@ -230,14 +230,14 @@ func (sc *ShardCtrler) handleApply() {
 			if applyLog.CommandValid {
 				op, ok := applyLog.Command.(Op)
 				if !ok {
-					sc.DPrintf("[panic] recieved apply log's command error")
-					sc.Kill()
-					return
+					panic(fmt.Sprintf("[panic] recieved apply log's command error"))
 				}
 
 				reply := &CommonReply{
 					Err: OK,
 				}
+				var lastNum int
+				groups := make(map[int][]string)
 
 				if applyLog.CommandIndex <= sc.lastApplyIndex {
 					// 比如 raft 重启了，就要重新 apply
@@ -248,15 +248,14 @@ func (sc *ShardCtrler) handleApply() {
 				sc.lastApplyIndex = applyLog.CommandIndex
 
 				sc.DPrintf("recieve apply log: %d, op info: %+v", applyLog.CommandIndex, op)
-				// 防止重复应用同一条修改命令
-				if op.Op != OpQuery && sc.isDuplicateRequest(op.ClientId, op.SequenceNum) {
-					sc.DPrintf("found duplicate request: %+v", op)
+				// 检查重复请求
+				if op.Op != OpQuery && sc.isDupModifyReq(op.ClientId, op.SequenceNum) {
+					sc.DPrintf("apply duplicate command: %+v", op)
 					continue
 				}
 
 				// 更新状态机
-				lastNum := len(sc.configs) - 1
-				groups := make(map[int][]string)
+				lastNum = len(sc.configs) - 1
 				for k, v := range sc.configs[lastNum].Groups {
 					groups[k] = v
 				}
@@ -316,7 +315,7 @@ func (sc *ShardCtrler) handleApply() {
 
 				sc.Lock("replyCommand")
 				if op.Op != OpQuery {
-					sc.updateDupReqHistory(op.ClientId, op.SequenceNum)
+					sc.updateDupModifyReq(op.ClientId, op.SequenceNum)
 				}
 
 				if _, ok := sc.notifyChans[applyLog.CommandIndex]; ok {
@@ -328,9 +327,7 @@ func (sc *ShardCtrler) handleApply() {
 				}
 				sc.Unlock("replyCommand")
 			} else {
-				sc.DPrintf(fmt.Sprintf("[panic] unexpected applyLog %v", applyLog))
-				sc.Kill()
-				return
+				panic(fmt.Sprintf("[panic] unexpected applyLog %+v", applyLog))
 			}
 		default:
 			continue
@@ -446,47 +443,617 @@ func (sc *ShardCtrler) balanceShard(groups map[int][]string) [NShards]int {
 
 
 
+测试：
+
+```go
+root@root:~/lz/6.824/src/shardctrler# go test
+Test: Basic leave/join ...
+  ... Passed
+Test: Historical queries ...
+  ... Passed
+Test: Move ...
+  ... Passed
+Test: Concurrent leave/join ...
+  ... Passed
+Test: Minimal transfers after joins ...
+  ... Passed
+Test: Minimal transfers after leaves ...
+  ... Passed
+Test: Multi-group join/leave ...
+  ... Passed
+Test: Concurrent multi leave/join ...
+  ... Passed
+Test: Minimal transfers after multijoins ...
+  ... Passed
+Test: Minimal transfers after multileaves ...
+  ... Passed
+Test: Check Same config on servers ...
+  ... Passed
+PASS
+ok  	6.824/shardctrler	7.327s
+
+```
+
+
+
 
 
 # Part B 设计思路
 
-Part B 算是整个实验最复杂的部分了，我们先来理清一下思路。每个服务器都会轮询配置，当配置变化时，服务器负责的分片情况可能会变化，那么有以下问题需要解决：
+Part B 我觉得是整个实验最复杂的部分了，我们先来理清一下思路。每个服务器都会轮询配置，当配置变化时，服务器负责的分片情况可能会变化，那么有以下问题需要解决：
 
 - 配置变化是否可以直接跳到最终配置？我觉得是不可以的，假设某个分片在配置 1 2 3 中分别由 x y z 负责，如果 z 直接从 x 中拉取分片，那么在 y 中接收的新请求就丢失了（y 可能还没检测到配置 3，并且分片已经从 1 拉取完毕）
-- 确定了配置要按顺序变化之后，还是上面那个场景，我们怎么保证 z 从 y 拉取分片时，y 已经从 x 拉取分片成功了呢？这就需要大家保证自己处于同一轮配置变化，等待操作完毕后才可以进入下一轮
-  - 每个服务器首先确认自己要推送哪些分片出去以及要新负责哪些分片，分片迁移需要携带配置变更的信息
-  - 当对方确认接收完毕以及等待自己接收到需要负责的分片后，可以进入下一轮
-  - 接收到推送数据时，只有其配置序号和自己一致时才可接收（因为一定要接收到指定分片才可以进入下一轮，所以不会出现某个服务器配置太高，却又需要之前某一轮配置的分片，只会存在某个服务器一直收不到某个分片而进入不了下一轮的情况）
-    - 考虑一种情况，服务器 x 从 y 获取了分片，但是 y 一直没有获取到自己想要的分片，在下一轮配置，分片又分给了 y，此时 x 无法将分片推给 y，而 y 在等待另一个分片到达（这里一定要等待，因为一定要从最初的服务器获取分片才可以继续服务，问题就在于正常的分片因此阻塞而无法继续服务了）
-    - 所以我们考虑仅仅服务器有配置序号信息是不够的，粒度应该更细一点，对分片记录配置序号信息，当接收的分片配置序号不小于本地时，可以接收并更新
-  - 在推送和接收分片的服务器，都要暂停对此分片的服务
-- 客户端发送请求时需要携带配置的序号，只有客户端和服务端分片处于同一配置时才可正常工作
-  - 如果客户端配置高，那么服务端要立刻去查询新配置，并进行迁移
-  - 如果服务端配置比较高，那么返回错误让客户端去更新配置
-- 只有 leader 将配置更新写入日志，但是可能会重复写入，所以 apply 时要处理重复的配置更新日志
-- 所有的配置更新都要写入日志，否则会导致线性不一致
+- 所有状态变化都要通过日志来处理，否则就会产生不同步，从而导致线性不一致
 
 
 
-没有快照之前，我们一定要进入迁移状态，才可以回复数据，否则可能还有日志没有 apply，此时数据库是不完全的
+## 结构体设计
 
-如果当前实际状态大于参数状态，表示已经拉取成功过了
+由于挑战里需要每个分片互不干扰，因此我们记录每个分片的状态，其余字段我们后面用到了再解释
+
+```go
+type ShardState struct {
+	State      string
+	PrevCfg    *shardctrler.Config
+	CurrentCfg *shardctrler.Config
+}
+
+type ShardKV struct {
+	mu     sync.RWMutex
+	dead   int32 // set by Kill()
+	cancel context.CancelFunc
+
+	me      int
+	applyCh chan raft.ApplyMsg
+	servers []*labrpc.ClientEnd
+	rf      *raft.Raft
+
+	make_end       func(string) *labrpc.ClientEnd
+	gid            int
+	ctrlers        []*labrpc.ClientEnd
+	mck            *shardctrler.Clerk
+	configs        []shardctrler.Config                   // 所有的配置信息
+	shardState     map[int]*ShardState                    // 分片的配置状态
+	updateConfigCh chan struct{}                          // 用于通知更新配置
+	pullData       [shardctrler.NShards]map[string]string // 等待被拉取时将数据保存在此，而不是每次遍历数据库去查找
+
+	maxraftstate int // snapshot if log grows this big
+
+	lastApplyIndex   int
+	db               map[string]string         // 内存数据库
+	notifyChans      map[int]chan *CommonReply // 监听请求 apply
+	notifyChansLock  sync.Mutex
+	dupModifyCommand [shardctrler.NShards]map[int64]int64 // 记录每个客户端每个分片最大已执行修改命令的序号
+}
+```
 
 
 
-加入快照以后，状态会更新跳变，此时可能不变，也可能是未来某种状态：
+## 初始化
 
-- 首先要等自己分片的状态状态至少和拉取服务器一样才能继续
-  - ReConfining：此时可能处于和没有快照场景一样的状态，也可能处于下一轮变换，但是不可能处于再高轮次了，因为它们存在依赖链
-  - Working：此时一定要当前状态大于参数一轮次才行，但这里是因为快照导致状态突变，所以一定曾经拉取成功并写入日志了，所以这里实际状态大于参数时，同样返回已经拉取成功即可
-  - prepareReconfig：这个状态其实可以当作 working 状态来看
-  - 因此不处于 ReConfining 状态时，当前分片轮次要大于参数一轮才可以回复，处于 ReConfining 状态时，要 prev 轮次大于等于参数轮次才可以回复
+```go
+func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int, gid int, ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.ClientEnd) *ShardKV {
+	// call labgob.Register on structures you want
+	// Go's RPC library to marshall/unmarshall.
+	labgob.Register(Op{})
+	labgob.Register(CommandArgs{})
+	labgob.Register(ReConfigLogArgs{})
+	labgob.Register(PullShardLogArgs{})
+	labgob.Register(UpdateShardLogArgs{})
+	labgob.Register(&ShardState{})
+	labgob.Register(&shardctrler.Config{})
+
+	kv := new(ShardKV)
+	kv.me = me
+	kv.applyCh = make(chan raft.ApplyMsg, 6)
+	kv.servers = servers
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+
+	kv.maxraftstate = maxraftstate
+
+	kv.make_end = make_end
+	kv.gid = gid
+	kv.ctrlers = ctrlers
+	// Use something like this to talk to the shardctrler:
+	kv.mck = shardctrler.MakeClerk(kv.ctrlers)
+
+	kv.configs = make([]shardctrler.Config, 1)
+	kv.configs[0].Groups = map[int][]string{}
+
+	kv.shardState = make(map[int]*ShardState, shardctrler.NShards)
+	for i := 0; i < shardctrler.NShards; i++ {
+		kv.shardState[i] = &ShardState{
+			State:      Working,
+			PrevCfg:    &kv.configs[0],
+			CurrentCfg: &kv.configs[0],
+		}
+		kv.dupModifyCommand[i] = make(map[int64]int64)
+	}
+	kv.updateConfigCh = make(chan struct{})
+
+	kv.lastApplyIndex = 0
+	kv.db = make(map[string]string)
+	kv.notifyChans = make(map[int]chan *CommonReply)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	kv.cancel = cancel
+	go kv.updateConfig(ctx)       // 负责从 shardctrler 拉取配置，写入配置更新日志
+	go kv.updatePullShardLog(ctx) // 负责写入配置更改日志
+	go kv.pullShard(ctx)          // 检测是否需要去拉取分片
+	go kv.noOpLog(ctx)            // 定期检查是否需要提交空日志
+	go kv.handleApply(ctx)        // 处理 raft apply
+
+	return kv
+}
+```
+
+流程主要是：
+
+- updateConfig 从 shardctrler 拉取配置，检查到更新就写入一条 ReConfigLog 用来更新 configs
+- updatePullShardLog 通过 configs 配置检查分片配置是否有变化，如果有变化就需要处理，此时也是写入一条 PullShardLog 同步集群的处理
+- 如果需要拉取分片，由 pullShard 调取 RPC 去获取分片，对端被拉取成功后写入 DeleteShardLog 删除多余分片，本端写入 UpdateShardLog 来更新分片
+- noOpLog 用来在切换 leader 后如果没有新的日志，那么以前的日志也不会提交，由于 6.824 不支持在 raft 层处理，因此放在状态机这里处理
+
+由上可知，我们的日志会有多种形式，这里也偷懒用一个结构体表示了：
+
+```go
+type Op struct {
+	LogType            string
+	CommandArgs        *CommandArgs
+	ReConfigLogArgs    *ReConfigLogArgs
+	PullShardLogArgs   *PullShardLogArgs
+	UpdateShardLogArgs *UpdateShardLogArgs
+	DeleteShardArgs    *DeleteShardArgs
+}
+```
+
+
+
+## updateConfig
+
+配置检查很简单，检查有新的日志就写入一条日志，WriteLog 是阻塞的，直到写入日志成功
+
+```go
+func (kv *ShardKV) updateConfig(ctx context.Context) {
+	ticker := time.NewTicker(time.Millisecond * 100)
+	for kv.killed() == false {
+		select {
+		case <-kv.updateConfigCh:
+		case <-ticker.C:
+		case <-ctx.Done():
+			return
+		}
+
+		_, isleader := kv.rf.GetState()
+		if !isleader {
+			continue
+		}
+
+		kv.RLock("queryNum")
+		queryNum := len(kv.configs)
+		kv.RUnlock("queryNum")
+		cfg := kv.mck.Query(queryNum)
+
+		kv.RLock("checkConfigUpdate")
+		if cfg.Num == len(kv.configs) {
+			args := ReConfigLogArgs{
+				PrevCfg:   kv.configs[len(kv.configs)-1],
+				UpdateCfg: cfg,
+			}
+			kv.RUnlock("checkConfigUpdate")
+
+			// WriteLog 只有 applyReConfig 成功才会返回
+			kv.WriteLog(ReConfigLog, args)
+		} else {
+			kv.RUnlock("checkConfigUpdate")
+		}
+	}
+}
+```
+
+这里不需要记录重复日志，因为可以根据参数状态来判断，只有要更新的日志序号是当前的下一条才会执行成功
+
+```go
+func (kv *ShardKV) applyReConfig(args *ReConfigLogArgs, applyLogIndex int) {
+	reply := &CommonReply{Err: OK}
+
+	kv.Lock("applyReConfig")
+	// 防止重复应用同一条修改命令
+	if args.UpdateCfg.Num < len(kv.configs) {
+		kv.DPrintf("apply duplicate ReConfigLog: %+v", args)
+	} else if args.UpdateCfg.Num == len(kv.configs) {
+		kv.configs = append(kv.configs, args.UpdateCfg)
+		kv.DPrintf("update configs: %+v", kv.configs)
+	} else {
+		panic(fmt.Sprintf("applyReConfig args:%+v kv.configs:%+v", args, kv.configs))
+	}
+	kv.Unlock("applyReConfig")
+
+	kv.notifyChansLock.Lock()
+	defer kv.notifyChansLock.Unlock()
+	if _, ok := kv.notifyChans[applyLogIndex]; ok {
+		select {
+		case kv.notifyChans[applyLogIndex] <- reply:
+		default:
+			kv.DPrintf("reply to chan index %d failed", applyLogIndex)
+		}
+	}
+}
+```
 
 
 
 
 
+## updatePullShardLog
+
+分片的状态有以下：
+
+```go
+Working           = "Working"
+PrepareReConfig   = "PrepareReConfig"
+PreparePull       = "PreparePull"
+Pulling           = "Pulling"
+WaitingToBePulled = "WaitingToBePulled"
+```
+
+PrepareReConfig 是一个过度状态，防止不停地写入重复更新的日志
+
+```go
+func (kv *ShardKV) updatePullShardLog(ctx context.Context) {
+	ticker := time.NewTicker(time.Millisecond * 100)
+	for kv.killed() == false {
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return
+		}
+
+		_, isleader := kv.rf.GetState()
+		if !isleader {
+			continue
+		}
+
+		kv.Lock("updatePullShardLog")
+		for shard, info := range kv.shardState {
+			if info.State == Working && kv.shardState[shard].CurrentCfg.Num+1 < len(kv.configs) {
+				kv.shardState[shard].State = PrepareReConfig
+				args := PullShardLogArgs{
+					Shard:     shard,
+					PrevCfg:   *kv.shardState[shard].CurrentCfg,
+					UpdateCfg: kv.configs[kv.shardState[shard].CurrentCfg.Num+1],
+				}
+				kv.DPrintf("shard %d state: %s %d->%d", shard, PrepareReConfig, args.PrevCfg.Num, args.UpdateCfg.Num)
+				go kv.WriteLog(PullShardLog, args)
+			}
+		}
+		kv.Unlock("updatePullShardLog")
+	}
+}
+```
+
+如果分片状态没改变，就直接 Working，如果需要拉取分片，则设置状态 PreparePull，由pullShard 协程去异步拉取，如果需要被拉取，设置 WaitingToBePulled，等待被拉取成功后再更新
+
+```go
+func (kv *ShardKV) applyPullShard(args *PullShardLogArgs, applyLogIndex int) {
+	reply := &CommonReply{Err: OK}
+	var prevGID, nowGID int
+
+	kv.Lock("applyPullShard")
+	// 防止重复应用同一条修改命令
+	if kv.shardState[args.Shard].CurrentCfg.Num >= args.UpdateCfg.Num {
+		kv.DPrintf("apply duplicate PullShardLog: %+v", args)
+		goto replyCommand
+	} else {
+		if kv.shardState[args.Shard].CurrentCfg.Num+1 != args.UpdateCfg.Num {
+			panic(fmt.Sprintf("applyPullShard shard %d CurrentCfg.Num %d, args.UpdateCfg.Num %d",
+				args.Shard, kv.shardState[args.Shard].CurrentCfg.Num, args.UpdateCfg.Num))
+		}
+	}
+
+	kv.shardState[args.Shard].PrevCfg = &args.PrevCfg
+	kv.shardState[args.Shard].CurrentCfg = &args.UpdateCfg
+	kv.DPrintf("update pull shard %d prevCfg:%+v, currentCfg: %+v", args.Shard,
+		kv.shardState[args.Shard].PrevCfg, kv.shardState[args.Shard].CurrentCfg)
+
+	prevGID = kv.shardState[args.Shard].PrevCfg.Shards[args.Shard]
+	nowGID = kv.shardState[args.Shard].CurrentCfg.Shards[args.Shard]
+	if nowGID == kv.gid {
+		if prevGID == kv.gid || prevGID == 0 {
+			kv.DPrintf("shard %d' gid not change, now cfg num is %d", args.Shard, kv.shardState[args.Shard].CurrentCfg.Num)
+			kv.shardState[args.Shard].State = Working
+		} else {
+			// 由 kv.pullShard 异步去拉取分片
+			kv.shardState[args.Shard].State = PreparePull
+		}
+	} else {
+		if prevGID != kv.gid {
+			kv.DPrintf("shard %d' gid not change, now cfg num is %d", args.Shard, kv.shardState[args.Shard].CurrentCfg.Num)
+			kv.shardState[args.Shard].State = Working
+		} else {
+			// 等待被拉取分片
+			kv.shardState[args.Shard].State = WaitingToBePulled
+			data := make(map[string]string)
+			for k, v := range kv.db {
+				if key2shard(k) == args.Shard {
+					data[k] = v
+				}
+			}
+			kv.pullData[args.Shard] = data
+		}
+	}
+	if prevGID == kv.gid && nowGID == 0 {
+		panic(fmt.Sprintf("[panic] nowGID is 0"))
+	}
+
+replyCommand:
+	kv.Unlock("applyPullShard")
+
+	kv.notifyChansLock.Lock()
+	defer kv.notifyChansLock.Unlock()
+	if _, ok := kv.notifyChans[applyLogIndex]; ok {
+		select {
+		case kv.notifyChans[applyLogIndex] <- reply:
+		default:
+			kv.DPrintf("reply to chan index %d failed", applyLogIndex)
+		}
+	}
+}
+```
 
 
 
 
+
+## pullShard
+
+拉取分片是个循环，它会一直拉取直到成功，成功后写入日志，等待日志被执行后，分片状态更新完毕就可以提供服务了
+
+pullData 记录要被拉取分片的数据，因为被拉取分片成功后，本端配置会更新，但是由于回复不一定到达了对端，对端还是会继续拉取请求，但此时分片可能已经被清理掉，那么就会产生错误的结果。
+
+```go
+func (kv *ShardKV) pullShard(ctx context.Context) {
+	ticker := time.NewTicker(time.Millisecond * 100)
+	for kv.killed() == false {
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return
+		}
+
+		_, isleader := kv.rf.GetState()
+		if !isleader {
+			continue
+		}
+
+		kv.Lock("pullShard")
+		for shard, info := range kv.shardState {
+			prevGID := info.PrevCfg.Shards[shard]
+			nowGID := info.CurrentCfg.Shards[shard]
+			if kv.shardState[shard].State == PreparePull && nowGID == kv.gid && prevGID != kv.gid && prevGID != 0 {
+				kv.DPrintf("=== %s %d from %d ===", kv.shardState[shard].State, shard, prevGID)
+				kv.shardState[shard].State = Pulling
+				go func(shard int, prevCfg shardctrler.Config) {
+					dstGID := prevCfg.Shards[shard]
+					gidServers := info.PrevCfg.Groups[dstGID]
+					kv.DPrintf("=== %s %d from %d ===", kv.shardState[shard].State, shard, dstGID)
+					args := PullShardArgs{
+						Shard:   shard,
+						PrevCfg: prevCfg,
+					}
+					// try each server for the shard.
+					for si := 0; si < len(gidServers); si++ {
+						srv := kv.make_end(gidServers[si])
+						var reply PullShardReply
+						ok := srv.Call("ShardKV.PullShard", &args, &reply)
+						if ok {
+							if reply.Err == OK {
+								kv.DPrintf("=== pullShard %d (cfg %d) from %d success ===", shard, prevCfg.Num, dstGID)
+								// 写入拉取成功日志
+								kv.WriteLog(UpdateShardLog, UpdateShardLogArgs{
+									Shard:            shard,
+									ShardCfgNum:      prevCfg.Num,
+									Data:             reply.Data,
+									DupModifyCommand: reply.DupModifyCommand,
+								})
+								return
+							}
+						}
+					}
+					// 执行不成功则重新检测拉取
+					kv.Lock("PreparePull")
+					kv.shardState[shard].State = PreparePull
+					kv.Unlock("PreparePull")
+				}(shard, *info.PrevCfg)
+			}
+		}
+		kv.Unlock("pullShard")
+	}
+}
+
+func (kv *ShardKV) applyUpdateShard(args *UpdateShardLogArgs, applyLogIndex int) {
+	reply := &CommonReply{Err: OK}
+
+	kv.Lock("applyUpdateShard")
+	prevGID := kv.shardState[args.Shard].PrevCfg.Shards[args.Shard]
+	nowGID := kv.shardState[args.Shard].CurrentCfg.Shards[args.Shard]
+	state := kv.shardState[args.Shard].State
+	if (state == PreparePull || state == Pulling) &&
+		kv.shardState[args.Shard].PrevCfg.Num == args.ShardCfgNum &&
+		nowGID == kv.gid && prevGID != kv.gid && prevGID != 0 {
+		kv.shardState[args.Shard].State = Working
+		for k, v := range args.Data {
+			kv.db[k] = v
+		}
+		kv.pullData[args.Shard] = make(map[string]string)
+
+		for clientId, sequenceNum := range args.DupModifyCommand {
+			kv.updateDupModifyReq(args.Shard, clientId, sequenceNum)
+		}
+		kv.DPrintf("update shard %d data success, now cfg num is %d", args.Shard, kv.shardState[args.Shard].CurrentCfg.Num)
+	} else {
+		kv.DPrintf("apply duplicate UpdateShardLog: %+v", args)
+	}
+	kv.Unlock("applyUpdateShard")
+
+	kv.notifyChansLock.Lock()
+	defer kv.notifyChansLock.Unlock()
+	if _, ok := kv.notifyChans[applyLogIndex]; ok {
+		select {
+		case kv.notifyChans[applyLogIndex] <- reply:
+		default:
+			kv.DPrintf("reply to chan index %d failed", applyLogIndex)
+		}
+	}
+}
+```
+
+被拉取的服务器由于可能会被快照导致状态跳变，所以当分片配置大于请求配置时，一定是已经曾经回复过了，但是由于回复不一定会成功到达，所以这里还是要返回当时分片的数据，也就是 pullData 里记录的数据，当被拉取成功时，就可以写入删除分片的日志了
+
+```go
+func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
+	_, isleader := kv.rf.GetState()
+	if !isleader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	kv.DPrintf("recv pullShard %d request: ", args.Shard)
+
+	kv.Lock("PullShard")
+	defer kv.Unlock("PullShard")
+
+	actualShardCfgNum := kv.shardState[args.Shard].CurrentCfg.Num
+	if kv.shardState[args.Shard].State != Working && kv.shardState[args.Shard].State != PrepareReConfig {
+		actualShardCfgNum = kv.shardState[args.Shard].PrevCfg.Num
+	}
+	kv.DPrintf("now state: %s, %d, %d", kv.shardState[args.Shard].State, args.PrevCfg.Num, actualShardCfgNum)
+	if args.PrevCfg.Num == actualShardCfgNum {
+		// 必须等到本服务器也开始迁移分片才能回复，否则数据库数据是不完全的
+		if kv.shardState[args.Shard].State != WaitingToBePulled {
+			reply.Err = ErrRetry
+			return
+		}
+	} else if args.PrevCfg.Num < actualShardCfgNum {
+		// 考虑快照会导致状态跳变，当分片配置大于参数配置时，表示一定曾经拉取成功了
+		// 但是回复不一定可以成功到达，所以这里也需要回复完整的数据，这里分片的数据不会变得比参数更新，因为如果要变化，需要依赖拉取服务器先更新成功
+	} else {
+		reply.Err = ErrRetry
+		return
+	}
+
+	reply.Err = OK
+	reply.Data = kv.pullData[args.Shard]
+	reply.DupModifyCommand = kv.dupModifyCommand[args.Shard]
+
+	kv.DPrintf("=== reply %+v pullShard %d success, cfg num up to %d ===", reply, args.Shard, kv.shardState[args.Shard].CurrentCfg.Num)
+	// 每个分片拉取或被拉取成功都表示这个分片可以开始服务了
+	// 写入删除分片日志，同步 Working 状态
+	go kv.WriteLog(DeleteShardLog, DeleteShardArgs{
+		Shard:       args.Shard,
+		ShardCfgNum: args.PrevCfg.Num,
+	})
+}
+
+func (kv *ShardKV) applyDeleteShard(args *DeleteShardArgs, applyLogIndex int) {
+	reply := &CommonReply{Err: OK}
+
+	kv.Lock("applyDeleteShard")
+	// 防止重复应用同一条修改命令
+	if kv.shardState[args.Shard].State == WaitingToBePulled && kv.shardState[args.Shard].PrevCfg.Num == args.ShardCfgNum {
+		kv.shardState[args.Shard].State = Working
+		for k, _ := range kv.pullData[args.Shard] {
+			delete(kv.db, k)
+		}
+		kv.DPrintf("delete shard %d success, now cfg num is %d", args.Shard, kv.shardState[args.Shard].CurrentCfg.Num)
+	} else {
+		kv.DPrintf("apply duplicate DeleteShardLog: %+v", args)
+	}
+	kv.Unlock("applyDeleteShard")
+
+	kv.notifyChansLock.Lock()
+	defer kv.notifyChansLock.Unlock()
+	if _, ok := kv.notifyChans[applyLogIndex]; ok {
+		select {
+		case kv.notifyChans[applyLogIndex] <- reply:
+		default:
+			kv.DPrintf("reply to chan index %d failed", applyLogIndex)
+		}
+	}
+}
+```
+
+
+
+## checkShard
+
+在分片迁移时时不能够提供服务的，可以根据分片的状态来判断
+
+```go
+func (kv *ShardKV) checkShard(key string, reply *CommonReply) bool {
+	shard := key2shard(key)
+	shardInfo := kv.shardState[shard]
+	// 当前分片不由 gid 负责
+	if shardInfo.CurrentCfg.Shards[shard] != kv.gid {
+		reply.Err = ErrWrongGroup
+		kv.DPrintf("key %s (shard %d) response %s", key, shard, reply.Err)
+		return true
+	}
+
+	// 之前不负责，现在需要负责的分片，等待分片传输完成再服务
+	if (shardInfo.State == PreparePull || shardInfo.State == Pulling) &&
+		shardInfo.PrevCfg.Shards[shard] != kv.gid && shardInfo.CurrentCfg.Shards[shard] == kv.gid {
+		reply.Err = ErrRetry
+		kv.DPrintf("[%s]: Waiting for key %s (shard %d) migration", shardInfo.State, key, shard)
+		return true
+	}
+
+	return false
+}
+```
+
+
+
+## 测试
+
+```go
+root@root:~/lz/6.824/src/shardkv# go test
+Test: static shards ...
+  ... Passed
+Test: join then leave ...
+  ... Passed
+Test: snapshots, join, and leave ...
+  ... Passed
+Test: servers miss configuration changes...
+  ... Passed
+Test: concurrent puts and configuration changes...
+  ... Passed
+Test: more concurrent puts and configuration changes...
+  ... Passed
+Test: concurrent configuration change and restart...
+  ... Passed
+Test: unreliable 1...
+  ... Passed
+Test: unreliable 2...
+  ... Passed
+Test: unreliable 3...
+  ... Passed
+
+// challenge1 失败
+Test: shard deletion (challenge 1) ...
+--- FAIL: TestChallenge1Delete (28.87s)
+    test_test.go:809: snapshot + persisted Raft state are too big: 295370 > 117000
+
+Test: unaffected shard access (challenge 2) ...
+  ... Passed
+Test: partial migration shard access (challenge 2) ...
+  ... Passed
+FAIL
+exit status 1
+FAIL	6.824/shardkv	289.032s
+
+```
+
+我的 challenge1 挑战失败了，原因在于我虽然删除了不再使用的分片，但是我用 pullData 记录了历史数据
+
+问题就在于，我无法保证当我回复拉取分片时，回复一定会成功，但此时我已经写入删除分片的日志了，所以应该在拉取分片的服务器端接收成功后，由它来发起删除分片的请求，以后有时间再继续调整测试……

@@ -448,59 +448,59 @@ func (rf *Raft) apply() {
 Lab 2 整个实验还是蛮有难度的，通过撒花🎉🎉
 
 ```bash
-[root@localhost raft]# go test
+root@root:~/lz/6.824/src/raft# go test
 Test (2A): initial election ...
-  ... Passed --   3.5  3   63   18574    0
+  ... Passed --   3.5  3   61   17858    0
 Test (2A): election after network failure ...
-  ... Passed --   5.6  3  128   28560    0
+  ... Passed --   5.6  3  127   27240    0
 Test (2A): multiple elections ...
-  ... Passed --   6.7  7  497  109962    0
+  ... Passed --   7.4  7  590  125349    0
 Test (2B): basic agreement ...
-  ... Passed --   1.2  3   15    4484    3
+  ... Passed --   1.2  3   15    4456    3
 Test (2B): RPC byte count ...
-  ... Passed --   2.9  3   47  114514   11
+  ... Passed --   2.9  3   46  114189   11
 Test (2B): agreement after follower reconnects ...
-  ... Passed --   6.5  3  111   31242    8
+  ... Passed --   4.9  3   85   23472    7
 Test (2B): no agreement if too many followers disconnect ...
-  ... Passed --   4.0  5  167   40197    3
+  ... Passed --   3.9  5  167   40326    3
 Test (2B): concurrent Start()s ...
-  ... Passed --   1.2  3   15    4522    6
+  ... Passed --   1.4  3   25    7693    6
 Test (2B): rejoin of partitioned leader ...
-  ... Passed --   6.9  3  185   47952    4
+  ... Passed --   6.8  3  186   48291    4
 Test (2B): leader backs up quickly over incorrect follower logs ...
-  ... Passed --  25.5  5 2010 1779416  102
+  ... Passed --  25.5  5 2430 2291421  102
 Test (2B): RPC counts aren't too high ...
-  ... Passed --   2.9  3   47   14396   12
+  ... Passed --   2.5  3   59   19324   12
 Test (2C): basic persistence ...
-  ... Passed --   5.5  3   95   25688    6
+  ... Passed --   4.9  3   78   21593    6
 Test (2C): more persistence ...
-  ... Passed --  22.1  5 1071  255128   17
+  ... Passed --  19.3  5  933  222051   16
 Test (2C): partitioned leader and one follower crash, leader restarts ...
-  ... Passed --   2.2  3   32    8839    4
+  ... Passed --   2.3  3   34    9167    4
 Test (2C): Figure 8 ...
-  ... Passed --  37.8  5  700  158969   25
+  ... Passed --  29.5  5  572  138293   35
 Test (2C): unreliable agreement ...
-  ... Passed --   9.5  5  352  120931  246
+  ... Passed --   3.5  5  996  362805  246
 Test (2C): Figure 8 (unreliable) ...
-  ... Passed --  46.8  5 3857 6684759  307
+  ... Passed --  44.5  5 8280 16249316   63
 Test (2C): churn ...
-  ... Passed --  16.5  5  505  215314  148
+  ... Passed --  16.3  5 7373 54233707 1763
 Test (2C): unreliable churn ...
-  ... Passed --  16.5  5  602  218584  114
+  ... Passed --  16.3  5 2454 4397045  578
 Test (2D): snapshots basic ...
-  ... Passed --   7.4  3  137   51016  201
+  ... Passed --   3.5  3  489  242625  207
 Test (2D): install snapshots (disconnect) ...
-  ... Passed --  51.9  3 1149  441962  320
+  ... Passed --  43.7  3 1472  961293  313
 Test (2D): install snapshots (disconnect+unreliable) ...
-  ... Passed --  60.9  3 1372  471372  299
+  ... Passed --  56.3  3 1780  896737  343
 Test (2D): install snapshots (crash) ...
-  ... Passed --  40.7  3  728  315829  313
+  ... Passed --  38.0  3 1173  556516  328
 Test (2D): install snapshots (unreliable+crash) ...
-  ... Passed --  45.5  3  813  323607  331
+  ... Passed --  44.5  3 1299  796843  340
 Test (2D): crash and restart all servers ...
-  ... Passed --  17.8  3  304   94479   71
+  ... Passed --  15.2  3  255   79096   59
 PASS
-ok  	6.824/raft	447.909s
+ok  	6.824/raft	403.618s
 ```
 
 ​	
