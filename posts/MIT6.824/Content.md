@@ -8,6 +8,14 @@
 
 ​	
 
+另外我还发现了一个课程翻译的付费资源，大家可以多支持支持
+
+[simviso针对2020课程翻译](https://www.simtoco.com/#/albums?id=1000019)
+
+[simviso针对2021课时追加翻译](https://www.simtoco.com/#/albums?id=1000044)
+
+​	
+
 ---
 
 # Introduction
