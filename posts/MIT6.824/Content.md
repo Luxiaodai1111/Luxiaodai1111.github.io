@@ -56,7 +56,7 @@
 
 [Raft 动画演示](http://kailing.pub/raft/index.html)
 
-[Raft Scope](https://raft.github.io/raftscope/index.html)
+[raft.github.io](https://raft.github.io/ ) 收录了关于 Raft 的论文、课程、书籍等资料，以及相关开源项目和 Raft 的运行情况可视化 [Raft Scope](https://raft.github.io/raftscope/index.html)，帮你彻底搞懂 Raft
 
 > ## [🏷️ Raft 01](posts/MIT6.824/Lecture/lecture06-Raft1.md)
 >
