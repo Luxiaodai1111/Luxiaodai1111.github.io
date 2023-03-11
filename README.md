@@ -78,6 +78,26 @@
 
 ---
 
+# 🛶 Raft专题
+
+>[raft.github.io](https://raft.github.io/ ) 收录了关于 Raft 的论文、课程、书籍等资料，以及相关开源项目，帮你彻底搞懂 Raft
+>
+>[Raft 动画演示](http://kailing.pub/raft/index.html)
+>
+>[Raft 的运行情况可视化](https://raft.github.io/raftscope/index.html)
+>
+>[📄 In Search of an Understandable Consensus Algorithm (Extended Version)](posts/经典论文导读/Raft-extended.md)
+>
+>[📄 Raft 博士毕业论文翻译](posts/经典论文导读/raft博士论文翻译.md)
+
+
+
+
+
+​	
+
+---
+
 # 🎯 Open Source Project Learning
 
 > ## [🌊 MIT 6.824](posts/MIT6.824/Content.md)
