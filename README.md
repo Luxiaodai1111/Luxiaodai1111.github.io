@@ -118,6 +118,10 @@
 
 # 📼 数据库
 
+>## [🔍 How Does a Database Work](posts/How-Does-a-Database-Work/Content.md)
+>
+>"How Does a Database Work" 是一个关于如何构建一个简单的数据库管理系统的教程网站。该教程使用 C 语言和 Unix 操作系统，涵盖了数据库的基本原理和实现细节，包括储存和读取数据、查询优化、索引、事务等方面内容。
+
 >   ## [⚓ etcd](posts/etcd/Content.md)
 >
 >   A distributed, reliable key-value store for the most critical data of a distributed system
@@ -160,6 +164,6 @@
 >
 > 此外，该书还介绍了一些高级命令行工具和技术，例如管道、重定向、正则表达式等。这些工具和技术可以帮助读者更高效地使用命令行工具，并在实际工作中提高生产力。
 
->## [☢️ MIT 6.S081](posts/MIT6.S081/Content.md)
+>## [☢️ MIT 6.S081（TODO）](posts/MIT6.S081/Content.md)
 >
 >麻省理工学院大名鼎鼎的 PDOS 实验室开设的面向 MIT 本科生的操作系统课程。前身是 MIT 著名的课程 6.828，MIT 的几位教授为了这门课曾专门开发了一个基于 x86 的教学用操作系统 JOS，被众多名校作为自己的操统课程实验。但随着 RISC-V 的横空出世，这几位教授又基于 RISC-V 开发了一个新的教学用操作系统 xv6，并开设了 MIT6.S081 这门课。由于 RISC-V 轻便易学的特点，学生不需要像此前 JOS 一样纠结于众多 x86 “特有的” 为了兼容而遗留下来的复杂机制，而可以专注于操作系统层面的开发。
