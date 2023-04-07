@@ -20,8 +20,11 @@
     * [🌋 性能之巅](posts/性能之巅/Content.md)
     * [📄 经典论文导读](posts/经典论文导读/Content.md)
 * ❤️ 友链
+
+  * [💘 CS 自学指南](https://csdiy.wiki/)
   * [💘 Learn Git Branching](https://learngitbranching.js.org/?locale=zh_CN)
   * [💘 drawio](https://app.diagrams.net/)
   * [💘 电脑博物馆](http://www.compumuseum.com/)
   * [💘 Hello Github](https://hellogithub.com/)
+
 
