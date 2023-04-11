@@ -20,6 +20,8 @@
 
 为了理解这些问题，此项目用 C 语言从头开始教学写一个克隆的 [sqlite](https://www.sqlite.org/arch.html)
 
+>另外关于 sqlite 本身的设计和故事也非常出彩，感兴趣的可以自行了解。[SQLite的文艺复兴](https://www.bmpi.dev/dev/renaissance-sqlite/)
+
  ![](Content/image-20230411154011746.png)
 
 > *“What I cannot create, I do not understand.”* – [Richard Feynman](https://en.m.wikiquote.org/wiki/Richard_Feynman)
