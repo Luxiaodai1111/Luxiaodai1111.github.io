@@ -6,7 +6,7 @@
 >
 >
 >
->- 🍉 本站内容部分基于现有资料整理，所涉及源码基本都审阅过，所涉及实验均是本人实践，可以放心食用
+>- 🍉 What I cannot create, I do not understand.
 >
 >
 >
@@ -44,10 +44,6 @@
 
 <!-- div:right-panel -->
 
-> ## [🚀 存储加速](posts/存储加速/Content.md)
->
-> SPDK、DPDK 加速套件（挖坑未填）
-
 >   ## [⚡ 高速缓存](posts/高速缓存/Content.md)
 >
 >   Cache 和内存模型相关知识
@@ -55,6 +51,10 @@
 >## [☔ 存储安全](posts/存储安全/Content.md)
 >
 >RAID、EC、快照、etc.
+
+>## [🚀 存储加速](posts/存储加速/Content.md)
+>
+>SPDK、DPDK 加速套件（挖坑未填）
 
 <!-- panels:end -->
 
