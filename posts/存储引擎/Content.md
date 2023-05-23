@@ -14,6 +14,10 @@
 
 
 
+相关资料：
+
+- [B+树,B-link树,LSM树...一个视频带你了解常用存储引擎数据结构（合集）](https://www.bilibili.com/video/BV1se4y1U7Dn/?spm_id_from=333.337.search-card.all.click&vd_source=9b454e3d070d6805fe299f27a2f45127)
+
 
 
 ​	
