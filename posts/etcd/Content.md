@@ -1,4 +1,4 @@
-# ⚓ etcd
+# ☸️ etcd
 
 官网：https://etcd.io/
 

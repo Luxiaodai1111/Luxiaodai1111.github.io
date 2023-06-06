@@ -10,10 +10,10 @@
     * [🚀 存储加速](posts/存储加速/Content.md)
     * [🎯 MIT 6.824](posts/MIT6.824/Content.md)
     * [☢️ rCore-Tutorial-Book](posts/rCore-Tutorial-Book/Content.md)
+    * [🍁 Talent Plan](posts/talent-plan/Content.md)
     * [🌩️ MinIO](posts/MinIO/Content.md)
     * [🐍 DIY Git in Python](posts/u-git/Content.md)
-    * [🔍 How Does a Database Work](posts/How-Does-a-Database-Work/Content.md)
-    * [⚓ etcd](posts/etcd/Content.md)
+    * [☸️ etcd](posts/etcd/Content.md)
     * [🔥 redis](posts/redis/Content.md)
     * [📄 经典论文导读](posts/经典论文导读/Content.md)
 * ❤️ 友链
